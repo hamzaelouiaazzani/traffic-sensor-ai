@@ -1,0 +1,84 @@
+ 
+# =========================
+# 🔥 Model weights
+# =========================
+detectors/
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# =========================
+# 📊 Outputs (your folder)
+# =========================
+output_images_videos/
+runs/
+results/
+outputs/
+
+# Generated media
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.jpg
+*.jpeg
+*.png
+
+# =========================
+# 🧠 Data (if any later)
+# =========================
+data/
+datasets/
+
+# =========================
+# 🧪 Jupyter
+# =========================
+.ipynb_checkpoints
+
+# =========================
+# 🐍 Python cache
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# =========================
+# 🧪 Testing / cache
+# =========================
+.pytest_cache/
+.cache/
+
+# =========================
+# ⚙️ Environment
+# =========================
+.env
+.venv
+venv/
+env/
+
+# =========================
+# 🧰 IDE / OS
+# =========================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# =========================
+# 📦 Logs
+# =========================
+logs/
+*.log
+
+# =========================
+# ⚠️ Optional: ignore notebooks outputs
+# =========================
+# Uncomment if needed
+# notebooks/*.ipynb
+
+# =========================
+# 📄 Keep configs tracked
+# =========================
+# (configs/ is important → DO NOT ignore)

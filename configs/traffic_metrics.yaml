@@ -1,0 +1,59 @@
+# configs/traffic_metrics.yaml
+
+# reusable geometry primitives (single source of truth)
+lines:
+    FL1:
+        points: [[371, 885], [151, 540]]
+        vicinity: 0.2
+
+    FL2:
+        points: [[1581, 614], [188, 341]]
+    
+
+speed_line_pairs:
+  SLP1:
+    line1_id: FL1
+    line2_id: FL2
+    distance_meters: 50.0
+    
+areas:
+  - name: "Direction_1"
+    enable: True
+    description: "This is Direction_1"
+    geometry:
+      polygon:
+        points: [[947, 6], [365, 1065], [2, 1060], [11, 15]]
+        distance_meters: 5
+      flow_line_id: "FL1"
+      speed_line_pair_id: "SLP1"
+
+  - name: "Direction_2"
+    enable: True
+    description: "This is Direction_2"
+    geometry:
+      polygon:
+        points: [[614, 94], [489, 1756], [6, 1871], [4, 64]]
+        distance_meters: 5
+      flow_line_id: "FL2"
+
+  - name: "Global_Stream"
+    enable: True
+    description: "Global monitoring area"
+    geometry:
+      flow_line_id: "FL2"
+      speed_line_pair_id: "SLP1"
+
+metrics:
+    general_params:
+        in_polygon_mode: "center_in_polygon"
+        homography_required: ["density", "speed", "headways_space"]
+
+    flow:
+        enabled: True
+        counting_logic: "counter_5"
+        time_window_sec: 60
+        output_unit: "veh/h"
+        
+        targets:
+            - area: "Direction_1"
+            - area: "Direction_2"
