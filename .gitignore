@@ -2,7 +2,7 @@
 # =========================
 # 🔥 Model weights
 # =========================
-detectors/
+models/
 *.pt
 *.pth
 *.onnx
@@ -11,7 +11,6 @@ detectors/
 # =========================
 # 📊 Outputs (your folder)
 # =========================
-output_images_videos/
 runs/
 results/
 outputs/
@@ -75,10 +74,12 @@ logs/
 # =========================
 # ⚠️ Optional: ignore notebooks outputs
 # =========================
-# Uncomment if needed
-# notebooks/*.ipynb
 
+.ipynb_checkpoints/
 # =========================
 # 📄 Keep configs tracked
 # =========================
 # (configs/ is important → DO NOT ignore)
+
+
+*.egg-info/
