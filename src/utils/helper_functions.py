@@ -44,47 +44,93 @@ def polygon_to_mask(polygon: np.ndarray) -> Tuple[np.ndarray, int, int]:
 
 
 
-def bbox_center_in_polygon(bboxes: np.ndarray , mask: np.ndarray, x_min: int, y_min: int) -> np.ndarray:
+
+def bbox_center_in_polygon(
+    mask: np.ndarray,
+    x_min: int,
+    y_min: int,
+    bboxes: np.ndarray = None,
+    points: np.ndarray = None
+) -> np.ndarray:
     """
-    (N,1) bool: True if bbox center is inside polygon mask.
+    (N,1) bool: True if bbox center (or provided points) is inside polygon.
     """
-    centers_x = ((bboxes[:,0] + bboxes[:,2]) * 0.5)
-    centers_y = ((bboxes[:,1] + bboxes[:,3]) * 0.5)
+
+    # no checks here
+    if points is not None:
+        centers_x = points[:, 0]
+        centers_y = points[:, 1]
+    else:
+        centers_x = (bboxes[:, 0] + bboxes[:, 2]) * 0.5
+        centers_y = (bboxes[:, 1] + bboxes[:, 3]) * 0.5
+
     x_idx = np.floor(centers_x - x_min).astype(int)
     y_idx = np.floor(centers_y - y_min).astype(int)
-    x_idx_clipped = np.clip(x_idx, 0, mask.shape[1]-1)
-    y_idx_clipped = np.clip(y_idx, 0, mask.shape[0]-1)
-    in_bounds = (x_idx >= 0) & (x_idx < mask.shape[1]) & (y_idx >= 0) & (y_idx < mask.shape[0])
+
+    x_idx_clipped = np.clip(x_idx, 0, mask.shape[1] - 1)
+    y_idx_clipped = np.clip(y_idx, 0, mask.shape[0] - 1)
+
+    in_bounds = (
+        (x_idx >= 0) & (x_idx < mask.shape[1]) &
+        (y_idx >= 0) & (y_idx < mask.shape[0])
+    )
+
     vals = mask[y_idx_clipped, x_idx_clipped].astype(bool)
     vals[~in_bounds] = False
-    return vals.reshape(-1,1)
+
+    return vals.reshape(-1, 1)
 
 
-def bbox_corners_in_polygon(bboxes: np.ndarray, mask: np.ndarray, x_min: int, y_min: int) -> np.ndarray:
-    """
-    (N,1) bool: True if ANY of the 4 bbox corners is inside polygon mask.
-    """
-    corners = np.stack([bboxes[:, [0,1]], bboxes[:, [2,1]], bboxes[:, [0,3]], bboxes[:, [2,3]]], axis=1)  # (N,4,2)
-    x_idx = np.floor(corners[:,:,0] - x_min).astype(int)
-    y_idx = np.floor(corners[:,:,1] - y_min).astype(int)
-    x_idx_clipped = np.clip(x_idx, 0, mask.shape[1]-1)
-    y_idx_clipped = np.clip(y_idx, 0, mask.shape[0]-1)
-    in_bounds = (x_idx >= 0) & (x_idx < mask.shape[1]) & (y_idx >= 0) & (y_idx < mask.shape[0])
-    inside_vals = mask[y_idx_clipped, x_idx_clipped].astype(bool)
-    inside_vals[~in_bounds] = False
-    return np.any(inside_vals, axis=1).reshape(-1,1)
 
 
-def bbox_any_in_polygon(bboxes: np.ndarray, mask: np.ndarray, x_min: int, y_min: int) -> np.ndarray:
+def bbox_corners_in_polygon(
+    mask: np.ndarray,
+    x_min: int,
+    y_min: int,
+    bboxes: np.ndarray,
+    points: np.ndarray = None
+) -> np.ndarray:
     """
-    Fully vectorized (no Python loop over boxes).
-    (N,1) bool: True if ANY integer point inside the bbox lies in the polygon mask.
-    Implementation:
-      - Build per-box integer ranges in mask coords (x_start..x_end, y_start..y_end).
-      - Broadcast to a (N, max_y, max_x) grid, ignore padded cells, lookup mask once,
-        then reduce per-box with np.any.
-    Notes: out-of-mask regions are treated as "outside".
+    (N,1) bool: True if ANY bbox corner is inside polygon.
     """
+
+    corners = np.stack([
+        bboxes[:, [0, 1]],
+        bboxes[:, [2, 1]],
+        bboxes[:, [0, 3]],
+        bboxes[:, [2, 3]]
+    ], axis=1)
+
+    x_idx = np.floor(corners[:, :, 0] - x_min).astype(int)
+    y_idx = np.floor(corners[:, :, 1] - y_min).astype(int)
+
+    x_idx_clipped = np.clip(x_idx, 0, mask.shape[1] - 1)
+    y_idx_clipped = np.clip(y_idx, 0, mask.shape[0] - 1)
+
+    in_bounds = (
+        (x_idx >= 0) & (x_idx < mask.shape[1]) &
+        (y_idx >= 0) & (y_idx < mask.shape[0])
+    )
+
+    vals = mask[y_idx_clipped, x_idx_clipped].astype(bool)
+    vals[~in_bounds] = False
+
+    return np.any(vals, axis=1).reshape(-1, 1)
+
+
+
+    
+def bbox_any_in_polygon(
+    mask: np.ndarray,
+    x_min: int,
+    y_min: int,
+    bboxes: np.ndarray,
+    points: np.ndarray = None
+) -> np.ndarray:
+    """
+    (N,1) bool: True if ANY pixel inside bbox lies in polygon.
+    """
+
     N = bboxes.shape[0]
     h, w = mask.shape
 
@@ -128,4 +174,3 @@ def bbox_any_in_polygon(bboxes: np.ndarray, mask: np.ndarray, x_min: int, y_min:
 
     any_inside = np.any(mask_vals, axis=(1,2)).reshape(-1,1)
     return any_inside
-

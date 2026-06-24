@@ -83,3 +83,7 @@ logs/
 
 
 *.egg-info/
+
+
+# UA-DETRAC dataset
+uadetrac_dataset/

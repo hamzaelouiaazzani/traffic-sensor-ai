@@ -1,0 +1,142 @@
+# configs/traffic_metrics.yaml
+
+
+frame_grabber:
+  source: "C:\\Users\\hamza\\Datasets\\TrafficDatasets\\IMAROC_2\\kech38.mp4"
+  stride: 1
+  stride_method: "periodic_stride"
+  window_size: null
+  grabber_mode: "latest"
+  queue_maxsize: 4
+  fallback_fps: 30
+  allow_dynamic_resolution: false
+  
+
+detector:
+  model_name: "yolo11n_finetuned"
+  confidence: 0.50    
+
+
+tracker:
+  method: "ocsort"
+  reid_model: "osnet_x0_25_market1501.pt"
+  classes: null
+  device: "cuda"
+  half: true
+  per_class: true
+  
+
+lines:
+  - line_id: "line_1"
+    points: [[1905, 365], [9, 687]]
+    vicinity: 0.15
+
+  - line_id: "line_2"
+    points: [[11, 506], [917, 768]]
+    vicinity: 0.1
+
+  - line_id: "line_3"
+    points: [[1675, 361], [2, 521]]
+    vicinity: 0.1
+    
+    
+areas:
+  - area_id: "area_1"
+    name: "Lane_1/Direction_1"
+    enable: true
+    description: "This is Lane_1 of Direction_1"
+
+    metrics:
+      - flow
+      - density
+      - occupancy
+      - space_headway
+      - time_headway
+
+    zone:
+      points: [[988, 66], [1207, 32], [1909, 544], [1914, 1056], [1653, 1058]]
+      distance_meters: 8
+
+    flow_line_id: "line_1"
+
+  - area_id: "area_2"
+    name: "Lane_2/Direction_1"
+    enable: true
+    description: "This is Lane_2 of Direction_1"
+
+    metrics:
+      - flow
+      - density
+      - occupancy
+      - space_headway
+      - time_headway
+
+    zone:
+      points: [[988, 87], [826, 96], [1067, 1058], [1655, 1060]]
+      distance_meters: 8
+
+    flow_line_id: "line_1"
+
+  - area_id: "area_3"
+    name: "Lane_1/Direction_2"
+    enable: true
+    description: "This is Lane_1 of Direction_2"
+
+    metrics:
+      - flow
+      - density
+      - occupancy
+      - space_headway
+      - time_headway
+
+    zone:
+      points: [[962, 1056], [798, 119], [576, 111], [297, 1065]]
+      distance_meters: 8
+
+    flow_line_id: "line_1"
+
+  - area_id: "area_4"
+    name: "Lane_2/Direction_2"
+    enable: true
+    description: "This is Lane_2 of Direction_2"
+
+    metrics:
+      - flow
+      - density
+      - occupancy
+      - space_headway
+      - time_headway
+
+    zone:
+      points: [[567, 141], [60, 13], [2, 634], [2, 1067], [292, 1067]]
+      distance_meters: 8
+
+    flow_line_id: "line_1"
+
+  - area_id: "area_5"
+    name: "Global_Stream"
+    enable: true
+    description: "Global monitoring area"
+
+    metrics:
+      - flow
+
+    flow_line_id: "line_1"
+    
+
+
+metrics:
+  flow:
+    counter_logic: "counter_5"
+    ttl_seconds: 30
+    
+
+
+general_params:
+    # workflow_mode: "all_in_edge"                                      
+    # time_base: "by_frame"                            # "by_frame" or "by_timestamp"  
+    frame_size: 1000
+    fps: 30
+    num_classes: 4
+    crossing_ttl: 30
+        
