@@ -206,7 +206,6 @@ torchvision==0.20.1+cu121
 torchviz==0.0.3
 tornado @ file:///C:/b/abs_7dzpc171lf/croot/tornado_1748956950306/work
 tqdm==4.67.1
--e git+https://github.com/hamzaelouiaazzani/traffic-sensor-ai.git@5bf463ec8040b7df281fcaa882089d8fb8304890#egg=traffic_vision_ai
 traitlets @ file:///C:/b/abs_bfsnoxl4pq/croot/traitlets_1718227069245/work
 treelib==1.6.1
 typing-inspection==0.4.2
