@@ -30,10 +30,11 @@ class OfflineMessageQueue:
 
         return path
 
-    def iter_messages(self) -> Iterable[Tuple[Path, Dict]]:
+    def iter_messages(self):
         for path in sorted(self.queue_dir.glob("*.json")):
             with path.open("r", encoding="utf-8") as f:
-                yield path, json.load(f)
+                message = json.load(f)
+            yield path, message
 
     def remove(self, path: Path) -> None:
         path.unlink(missing_ok=True)

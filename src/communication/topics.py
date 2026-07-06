@@ -51,6 +51,14 @@ class SensorTopics:
         return f"{self.base}/responses/stop"
 
     @property
+    def reboot_command(self) -> str:
+        return f"{self.base}/commands/reboot"
+
+    @property
+    def reboot_response(self) -> str:
+        return f"{self.base}/responses/reboot"
+
+    @property
     def all_commands(self) -> str:
         return f"{self.base}/commands/#"
 

@@ -70,35 +70,36 @@ class SmartSensorMqttClient:
         for topic in topics:
             self.client.subscribe(topic, qos=self.config.qos)
 
-    def publish_json(
+
+
+    def publish(
         self,
         topic: str,
-        payload: Dict[str, Any],
+        payload: bytes | str,
         qos: Optional[int] = None,
         retain: Optional[bool] = None,
         queue_on_failure: bool = True,
     ) -> bool:
         qos = self.config.qos if qos is None else qos
         retain = self.config.retain if retain is None else retain
-
+    
         if not self.connected:
             if queue_on_failure:
                 self.queue.enqueue(topic, payload, qos, retain)
             return False
-
-        message = json.dumps(payload, ensure_ascii=False)
+    
         info = self.client.publish(
-            topic,
-            payload=message,
+            topic=topic,
+            payload=payload,
             qos=qos,
             retain=retain,
         )
-
+    
         if info.rc != mqtt.MQTT_ERR_SUCCESS:
             if queue_on_failure:
                 self.queue.enqueue(topic, payload, qos, retain)
             return False
-
+    
         return True
 
     def flush_pending(self) -> int:
@@ -108,7 +109,7 @@ class SmartSensorMqttClient:
             return sent
 
         for path, message in self.queue.iter_messages():
-            ok = self.publish_json(
+            ok = self.publish(
                 topic=message["topic"],
                 payload=message["payload"],
                 qos=message["qos"],
@@ -155,6 +156,7 @@ class SmartSensorMqttClient:
         properties=None,
     ) -> None:
         self.connected = False
+        print("Disconnected! Reason:", reason_code)
 
     def _on_message(
         self,

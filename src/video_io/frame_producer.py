@@ -805,17 +805,6 @@ class FrameProducer(threading.Thread):
         self.grabber.release()
 
 
-
-
-
-
-
-
-
-
-
-
-
 # ==========================================================
 # REAL-TIME SIMULATION PRODUCER
 # ==========================================================
