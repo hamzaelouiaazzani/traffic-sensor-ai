@@ -1,0 +1,12 @@
+# Runtime dependencies traced from scripts/run_sensor.py and scripts/sensor_daemon.py.
+# On Jetson Orin Nano, install torch/torchvision builds matching the JetPack/CUDA version.
+boxmot==15.0.10
+numpy==1.24.4
+opencv-python-headless==4.11.0.86
+paho-mqtt==2.1.0
+pillow==11.0.0
+pydantic==2.12.5
+PyYAML
+torch
+torchvision
+ultralytics==8.4.5
