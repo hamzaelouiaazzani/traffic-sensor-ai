@@ -6,6 +6,7 @@ from communication.topics import SensorTopics
 from dataclasses import dataclass
 from typing import Optional
 from datetime import datetime
+import threading
 
 import cv2
 import json
@@ -93,46 +94,68 @@ import cv2
 
 
 
+class LatestFrameStore:
+    """
+    Thread-safe handoff for the latest frame acquired by the processing pipeline.
+
+    The stored frame is copied once when updated so snapshot encoding never reads
+    directly from an OpenCV capture buffer or from an array owned by the pipeline.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._frame = None
+        self._frame_idx = None
+
+    def update(self, frame, frame_idx=None) -> None:
+        if frame is None:
+            return
+
+        with self._lock:
+            self._frame = frame.copy()
+            self._frame_idx = frame_idx
+
+    def get_latest(self):
+        with self._lock:
+            return self._frame, self._frame_idx
+
+
 
 
 class SnapshotProviderService:
-    def __init__(self, mqtt_client, topics, camera_source: int = 0, jpeg_quality: int = 90):
+    def __init__(
+        self,
+        mqtt_client,
+        topics,
+        frame_store: Optional[LatestFrameStore] = None,
+        jpeg_quality: int = 90,
+    ):
         self.mqtt_client = mqtt_client
         self.topics = topics
-        self.camera_source = camera_source
+        self.frame_store = frame_store
         self.jpeg_quality = jpeg_quality
 
     def capture_frame(self):
-        print("[Snapshot] Opening camera...")
-    
-        cap = cv2.VideoCapture(self.camera_source)
-        print("[Snapshot] isOpened =", cap.isOpened())
-    
-        if not cap.isOpened():
-            print(f"[Snapshot] Cannot open camera source {self.camera_source}")
+        if self.frame_store is None:
+            print("[Snapshot] No latest-frame store is configured")
             return None
-    
-        print("[Snapshot] Reading frame...")
-        ok, frame = cap.read()
-        print("[Snapshot] read() =", ok)
-    
-        cap.release()
-        print("[Snapshot] Camera released")
-    
-        if not ok:
-            print("[Snapshot] Failed to capture frame")
+
+        frame, frame_idx = self.frame_store.get_latest()
+        if frame is None:
+            print("[Snapshot] No processed frame is available yet")
             return None
-    
+
+        print(f"[Snapshot] Using latest processed frame idx = {frame_idx}")
         return frame
         
 
     def handle_snapshot_request(self, payload: bytes) -> bool:
         print("[Snapshot] Request received")
-
+    
         frame = self.capture_frame()
         if frame is None:
             return False
-
+    
         ok, buffer = cv2.imencode(
             ".jpg",
             frame,
@@ -141,15 +164,18 @@ class SnapshotProviderService:
         if not ok:
             print("[Snapshot] JPEG encoding failed")
             return False
-
+    
         jpeg_bytes = buffer.tobytes()
-
-        return self.mqtt_client.publish(
+        print(f"[Snapshot] JPEG size = {len(jpeg_bytes)} bytes")
+    
+        published = self.mqtt_client.publish(
             topic=self.topics.snapshot_response,
             payload=jpeg_bytes,
         )
-
-
+    
+        print(f"[Snapshot] MQTT publish = {published}")
+    
+        return published
 
 
 class SnapshotReceiverService:

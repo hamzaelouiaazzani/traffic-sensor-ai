@@ -1,0 +1,32 @@
+[Unit]
+Description=Smart Traffic Sensor Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+User=hamza
+Group=hamza
+
+WorkingDirectory=/home/hamza/traffic-sensor-ai
+
+Environment=PYTHONPATH=/home/hamza/traffic-sensor-ai
+ExecStartPre=/bin/sleep 10
+ExecStart=/home/hamza/traffic-sensor-ai/smart_sensor_traffic/bin/python \
+    /home/hamza/traffic-sensor-ai/scripts/sensor_daemon.py \
+    --source 0 \
+    --period-mins 0.2 \
+    --sensor-id camera_1 \
+    --mqtt-broker-host 10.101.100.47
+
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
+

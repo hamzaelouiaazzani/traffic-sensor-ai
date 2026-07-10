@@ -80,6 +80,7 @@ class SmartSensorMqttClient:
         retain: Optional[bool] = None,
         queue_on_failure: bool = True,
     ) -> bool:
+        print(f"[MQTT] Publishing to '{topic}', connected={self.connected}, payload={len(payload) if isinstance(payload, bytes) else len(str(payload))} bytes")
         qos = self.config.qos if qos is None else qos
         retain = self.config.retain if retain is None else retain
     

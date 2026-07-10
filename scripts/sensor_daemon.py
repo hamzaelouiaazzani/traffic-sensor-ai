@@ -1,15 +1,21 @@
 import argparse
 import logging
 import signal
+import subprocess
 import threading
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
 from communication.mqtt_client import MqttClientConfig, SmartSensorMqttClient
-from communication.services import ConfigurationReceiverService, SnapshotProviderService
+from communication.services import (
+    ConfigurationReceiverService,
+    LatestFrameStore,
+    SnapshotProviderService,
+)
 from communication.topics import SensorTopics
 from sensor_pipeline import run_sensor
+from video_io.frame_producer import DirectFrameProducer
 
 
 class SensorState(str, Enum):
@@ -19,6 +25,65 @@ class SensorState(str, Enum):
 
 
 CommandHandler = Callable[[bytes], None]
+
+
+class ReadyFrameAcquisitionService:
+    """
+    Lightweight frame acquisition used while the daemon is READY.
+
+    This service is the sole owner of the video source before processing starts.
+    It is stopped and released before the processing pipeline opens the source.
+    """
+
+    def __init__(
+        self,
+        source,
+        frame_store: LatestFrameStore,
+        interval_seconds: float = 0.2,
+    ):
+        self.source = source
+        self.frame_store = frame_store
+        self.interval_seconds = interval_seconds
+        self.stop_event = threading.Event()
+        self.thread = None
+        self.logger = logging.getLogger(__name__)
+
+    def start(self) -> None:
+        if self.thread is not None and self.thread.is_alive():
+            return
+
+        self.stop_event.clear()
+        self.thread = threading.Thread(
+            target=self._run,
+            name="ready-frame-acquisition",
+        )
+        self.thread.start()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.thread is not None and self.thread.is_alive():
+            self.thread.join()
+        self.thread = None
+
+    def _run(self) -> None:
+        producer = DirectFrameProducer(self.source)
+
+        try:
+            producer.start()
+
+            while not self.stop_event.is_set():
+                frame = producer.next_frame()
+                if frame is None:
+                    break
+
+                self.frame_store.update(frame.data, frame.read_idx)
+                self.stop_event.wait(self.interval_seconds)
+
+        except Exception:
+            self.logger.exception("READY frame acquisition stopped unexpectedly.")
+
+        finally:
+            producer.release()
 
 
 class SensorDaemon:
@@ -52,6 +117,11 @@ class SensorDaemon:
         self.topics = None
         self.snapshot_service = None
         self.configuration_receiver = None
+        self.latest_frame_store = LatestFrameStore()
+        self.ready_frame_acquisition = ReadyFrameAcquisitionService(
+            source=self.source,
+            frame_store=self.latest_frame_store,
+        )
         self.command_handlers: Dict[str, CommandHandler] = {}
 
         self.state = SensorState.BOOTING
@@ -67,6 +137,7 @@ class SensorDaemon:
         self.transition_to(SensorState.BOOTING)
         self._initialize_lifecycle()
         self.transition_to(SensorState.READY)
+        self._start_ready_frame_acquisition()
         self.run()
 
     def run(self) -> None:
@@ -79,6 +150,7 @@ class SensorDaemon:
 
     def shutdown(self) -> None:
         self.shutdown_event.set()
+        self._stop_ready_frame_acquisition()
         self._stop_processing(wait=True)
 
         if self.mqtt_client is not None:
@@ -124,6 +196,7 @@ class SensorDaemon:
                 self.logger.warning("START rejected because no configuration has been received.")
                 return
 
+            self._stop_ready_frame_acquisition()
             self.stop_event = threading.Event()
             self.processing_thread = threading.Thread(
                 target=self._run_processing,
@@ -141,17 +214,24 @@ class SensorDaemon:
             if self.stop_event is not None:
                 self.stop_event.set()
 
-    def handle_reboot_command(self, payload: bytes) -> None:
-        with self._lock:
-            if self._reboot_thread is not None and self._reboot_thread.is_alive():
-                self.logger.warning("REBOOT ignored because a reboot is already in progress.")
-                return
+    # def handle_reboot_command(self, payload: bytes) -> None:
+    #     with self._lock:
+    #         if self._reboot_thread is not None and self._reboot_thread.is_alive():
+    #             self.logger.warning("REBOOT ignored because a reboot is already in progress.")
+    #             return
 
-            self._reboot_thread = threading.Thread(
-                target=self.restart_daemon,
-                name=f"{self.sensor_id}-restart",
-            )
-            self._reboot_thread.start()
+    #         self._reboot_thread = threading.Thread(
+    #             target=self.restart_daemon,
+    #             name=f"{self.sensor_id}-restart",
+    #         )
+    #         self._reboot_thread.start()
+
+
+
+    def handle_reboot_command(self, payload: bytes) -> None:
+        self.logger.info("Reboot command received. Rebooting Jetson...")
+        subprocess.run(["sudo", "reboot"], check=False)
+    
 
     def transition_to(self, state: SensorState) -> None:
         with self._lock:
@@ -188,7 +268,7 @@ class SensorDaemon:
         self.snapshot_service = SnapshotProviderService(
             mqtt_client=self.mqtt_client,
             topics=self.topics,
-            camera_source=self.source,
+            frame_store=self.latest_frame_store,
         )
         self.configuration_receiver = ConfigurationReceiverService(
             target_dir=str(config_path.parent),
@@ -214,6 +294,7 @@ class SensorDaemon:
                 sensor_id=self.sensor_id,
                 mqtt_client=self.mqtt_client,
                 stop_event=self.stop_event,
+                latest_frame_store=self.latest_frame_store,
             )
         except Exception:
             self.logger.exception("Processing pipeline terminated with an error.")
@@ -223,6 +304,7 @@ class SensorDaemon:
                 self.stop_event = None
                 if self.state is SensorState.PROCESSING:
                     self.transition_to(SensorState.READY)
+                    self._start_ready_frame_acquisition()
 
     def _stop_processing(self, wait: bool) -> None:
         with self._lock:
@@ -233,7 +315,15 @@ class SensorDaemon:
         if wait and thread is not None and thread.is_alive():
             thread.join()
 
+    def _start_ready_frame_acquisition(self) -> None:
+        if self.state is SensorState.READY and not self.shutdown_event.is_set():
+            self.ready_frame_acquisition.start()
+
+    def _stop_ready_frame_acquisition(self) -> None:
+        self.ready_frame_acquisition.stop()
+
     def restart_daemon(self) -> None:
+        self._stop_ready_frame_acquisition()
         self._stop_processing(wait=True)
         self.transition_to(SensorState.BOOTING)
 
@@ -252,6 +342,7 @@ class SensorDaemon:
 
         self._initialize_lifecycle()
         self.transition_to(SensorState.READY)
+        self._start_ready_frame_acquisition()
 
 
 def parse_args():

@@ -241,22 +241,24 @@ class FrameGrabber:
     - prerecorded videos
     """
 
-    def __init__(self, source):
+    def __init__(self, source, fallback_fps: float = 30.0):
 
         self.source = source
+        self.capture_source = self._normalize_source(source)
 
         self.cap = None
 
         self.read_idx = 0
 
+        self._fallback_fps = fallback_fps
 
-        self._fps = self.fps
+        self._fps = fallback_fps
 
-        self._sleep = 1 / self._fps
+        self._sleep = 1 / self._fps if self._fps > 0 else 0
 
-        self._frame_width = self.frame_width
+        self._frame_width = None
 
-        self._frame_height = self.frame_height
+        self._frame_height = None
 
     # ======================================================
     # OPEN SOURCE
@@ -264,13 +266,22 @@ class FrameGrabber:
 
     def open(self):
 
-        self.cap = cv2.VideoCapture(self.source)
+        self.cap = cv2.VideoCapture(self.capture_source)
 
         if not self.cap.isOpened():
 
             raise RuntimeError(
                 f"Failed to open source: {self.source}"
             )
+
+        self._refresh_metadata()
+
+    def _refresh_metadata(self):
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        self._fps = float(fps) if fps and fps > 0 else float(self._fallback_fps)
+        self._sleep = 1 / self._fps if self._fps > 0 else 0
+        self._frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self._frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
     # ======================================================
     # GRAB FRAME
@@ -282,7 +293,7 @@ class FrameGrabber:
         # Regulate prerecorded video playback speed
         # --------------------------------------------------
 
-        if isinstance(self.source, str):
+        if self._should_regulate_source():
             time.sleep(self._sleep)
 
         # --------------------------------------------------
@@ -316,25 +327,27 @@ class FrameGrabber:
 
         if self.cap is not None:
             self.cap.release()
+            self.cap = None
 
     # ======================================================
     # SOURCE METADATA
     # ======================================================
-    # ======================================================
-    # INTERNAL TEMP OPEN
-    # ======================================================
+    def _should_regulate_source(self) -> bool:
+        if not isinstance(self.source, str):
+            return False
 
-    def _open_temp_capture(self):
+        source = self.source.strip().lower()
+        if source.isdigit() or source.startswith("/dev/video"):
+            return False
 
-        temp_cap = cv2.VideoCapture(self.source)
+        return True
 
-        if not temp_cap.isOpened():
+    @staticmethod
+    def _normalize_source(source):
+        if isinstance(source, str) and source.strip().isdigit():
+            return int(source.strip())
 
-            raise RuntimeError(
-                f"Failed to open source: {self.source}"
-            )
-
-        return temp_cap
+        return source
 
     # ======================================================
     # SOURCE METADATA
@@ -344,63 +357,28 @@ class FrameGrabber:
     def fps(self):
 
         if self.cap is not None:
-            return int(self.cap.get(cv2.CAP_PROP_FPS)) 
-            
-        temp_cap = self._open_temp_capture()
+            fps = self.cap.get(cv2.CAP_PROP_FPS)
+            if fps and fps > 0:
+                self._fps = float(fps)
+                self._sleep = 1 / self._fps
 
-        fps = temp_cap.get(
-            cv2.CAP_PROP_FPS
-        )
-
-        temp_cap.release()
-
-        return int(fps)
+        return self._fps
 
     @property
     def frame_width(self):
 
         if self.cap is not None:
+            self._frame_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 
-            return int(
-                self.cap.get(
-                    cv2.CAP_PROP_FRAME_WIDTH
-                )
-            )
-
-        temp_cap = self._open_temp_capture()
-
-        width = int(
-            temp_cap.get(
-                cv2.CAP_PROP_FRAME_WIDTH
-            )
-        )
-
-        temp_cap.release()
-
-        return int(width)
+        return self._frame_width
 
     @property
     def frame_height(self):
 
         if self.cap is not None:
+            self._frame_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-            return int(
-                self.cap.get(
-                    cv2.CAP_PROP_FRAME_HEIGHT
-                )
-            )
-
-        temp_cap = self._open_temp_capture()
-
-        height = int(
-            temp_cap.get(
-                cv2.CAP_PROP_FRAME_HEIGHT
-            )
-        )
-
-        temp_cap.release()
-
-        return int(height)
+        return self._frame_height
 
 
 

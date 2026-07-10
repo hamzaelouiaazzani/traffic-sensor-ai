@@ -7,6 +7,6 @@ paho-mqtt==2.1.0
 pillow==11.0.0
 pydantic==2.12.5
 PyYAML
-torch
-torchvision
+# torch
+# torchvision
 ultralytics==8.4.5

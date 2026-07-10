@@ -10,7 +10,7 @@ from config.load_build import (
     load_config,
 )
 from communication.mqtt_client import SmartSensorMqttClient
-from communication.services import MetricsPublisherService
+from communication.services import LatestFrameStore, MetricsPublisherService
 from communication.topics import SensorTopics
 from detection.factory import build_detector
 from tracking.track import Tracker
@@ -138,6 +138,7 @@ def process_period(
     period_frames,
     period_idx,
     device,
+    latest_frame_store: Optional[LatestFrameStore] = None,
 ):
     areas, geometry_engine, crossing_estimator, tracker = build_period_state(cfg)
 
@@ -162,6 +163,9 @@ def process_period(
 
             if first_frame_idx is None:
                 first_frame_idx = frame.read_idx
+
+            if latest_frame_store is not None:
+                latest_frame_store.update(frame.data, frame.read_idx)
 
             print(frame.read_idx)
             last_frame_idx = frame.read_idx
@@ -231,6 +235,7 @@ def run_sensor(
     sensor_id: str = "camera_1",
     mqtt_client: Optional[SmartSensorMqttClient] = None,
     stop_event: Optional[Event] = None,
+    latest_frame_store: Optional[LatestFrameStore] = None,
 ) -> None:
     cfg = load_config(config_path)
 
@@ -263,6 +268,7 @@ def run_sensor(
                 period_frames=period_frames,
                 period_idx=period_idx,
                 device=device,
+                latest_frame_store=latest_frame_store,
             )
 
             if result["frames_processed"] == 0:

@@ -16,6 +16,6 @@ setup(
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     
-    install_requires=(PARENT / 'requirements.txt').read_text().splitlines(),
+    install_requires=(PARENT / 'requirements_deploy.txt').read_text().splitlines(),
     python_requires='>=3.8',
 )
