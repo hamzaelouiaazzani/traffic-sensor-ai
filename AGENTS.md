@@ -4,6 +4,16 @@
 
 ## Codex Working Rules
 
+### Repository Navigation and Context Efficiency
+
+* Before identifying, opening, modifying, adding, moving, or deleting any source file, class, function, configuration, or module, first consult `REPOSITORY_CONTEXT.md`.
+* Use `REPOSITORY_CONTEXT.md` as the primary architectural map to determine which components and files are relevant to the requested task.
+* Do not perform repository-wide searches or scans when `REPOSITORY_CONTEXT.md` already identifies the relevant modification targets.
+* After identifying candidate files from `REPOSITORY_CONTEXT.md`, inspect only those files and their directly relevant dependencies.
+* Expand exploration to other parts of the repository only when the documented context is insufficient, inconsistent with the current code, or the task explicitly requires broader analysis.
+* Treat the current source code as the final authority if it conflicts with `REPOSITORY_CONTEXT.md`, and report the documentation drift when relevant.
+
+
 ### Repository Understanding
 
 * Before responding to any request, read AGENTS.md.

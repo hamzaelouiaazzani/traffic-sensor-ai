@@ -84,6 +84,8 @@ logs/
 
 *.egg-info/
 
+# Local instructions
+AGENTS.md
 
 # UA-DETRAC dataset
 uadetrac_dataset/
