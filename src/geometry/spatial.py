@@ -7,6 +7,34 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 
+def image_line_coefficients(points: np.ndarray) -> np.ndarray:
+    """Return canonical image-space line coefficients plus the line norm."""
+
+    arr = np.asarray(points, dtype=np.float64)
+    if arr.shape != (2, 2):
+        raise ValueError("line points must have shape (2, 2)")
+
+    (x1, y1), (x2, y2) = arr
+    a = y2 - y1
+    b = x1 - x2
+    c = x2 * y1 - x1 * y2
+
+    if not np.allclose([a, b, c], np.round([a, b, c])):
+        return line_coefficients(arr)
+
+    a_i, b_i, c_i = int(round(a)), int(round(b)), int(round(c))
+    gcd_value = math.gcd(math.gcd(abs(a_i), abs(b_i)), abs(c_i)) or 1
+    a_i, b_i, c_i = a_i // gcd_value, b_i // gcd_value, c_i // gcd_value
+
+    if a_i < 0 or (a_i == 0 and b_i < 0):
+        a_i, b_i, c_i = -a_i, -b_i, -c_i
+
+    norm = np.sqrt(a_i * a_i + b_i * b_i)
+    if norm <= 1e-12:
+        raise ValueError("line requires two distinct points")
+    return np.asarray([a_i, b_i, c_i, norm], dtype=np.float64)
+
+
 def line_coefficients(points: np.ndarray) -> np.ndarray:
     """Return Ax + By + C = 0 coefficients plus the line norm."""
 
@@ -176,7 +204,7 @@ def bbox_any_in_polygon(
 
 
 def points_in_polygon(points: np.ndarray, polygon: np.ndarray) -> np.ndarray:
-    """Vectorized point-in-polygon test for metric/world coordinates."""
+    """Vectorized point-in-polygon test for arbitrary coordinate systems."""
 
     n_obs = points.shape[0]
     if n_obs == 0:

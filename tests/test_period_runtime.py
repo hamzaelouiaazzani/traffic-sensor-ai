@@ -11,7 +11,7 @@ from config.load_build import (
     load_config,
 )
 from geometry.homography import Homography, compute_homography, save_calibration_yaml
-from geometry.primitives import GeometryEngine
+from geometry.engine import GeometryEngine
 from runtime.observations import (
     PeriodObservationBatch,
     PeriodObservationBuffer,
@@ -308,6 +308,41 @@ class PeriodRuntimeTest(unittest.TestCase):
         self.assertEqual(set(geometry_engine._line_ids), {"line_a", "line_b"})
         np.testing.assert_allclose(geometry_engine._thresh, [5.0, 5.0])
 
+    def test_primitives_are_coordinate_system_agnostic(self):
+        cfg = _config()
+        areas = build_areas(cfg, num_classes=4)
+        area = areas[0]
+
+        self.assertEqual(area.flow_line.points, ((0.0, 50.0), (100.0, 50.0)))
+        self.assertEqual(area.zone.points, [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)])
+        self.assertEqual(area.distance_meters, 100.0)
+        self.assertEqual(set(type(area.flow_line).model_fields), {"line_id", "points"})
+        self.assertEqual(set(type(area.zone).model_fields), {"polygon_id", "points"})
+
+    def test_geometry_engine_owns_coordinate_specific_spatial_caches(self):
+        cfg = _config(image_vicinity=0.05, world_vicinity=0.5)
+        areas = build_areas(cfg, num_classes=4)
+        image_engine = build_geometry_engine(areas, cfg)
+        world_engine = GeometryEngine(
+            lines={area.flow_line.line_id: area.flow_line for area in areas if area.flow_line is not None},
+            polygons={area.zone.polygon_id: area.zone for area in areas if area.zone is not None},
+            polygon_mode="center",
+            coordinate_space="world",
+            line_vicinity_thresholds={"line_a": 0.5},
+        )
+        points = np.asarray([[50.0, 49.8], [50.0, 60.0]], dtype=np.float32)
+        bboxes = np.asarray([_bbox_from_point(x, y) for x, y in points], dtype=np.float32)
+
+        image_line_cache, image_polygon_cache = image_engine.compute(points, bboxes)
+        world_line_cache, world_polygon_cache = world_engine.compute(points, bboxes)
+
+        self.assertEqual(set(image_line_cache), {"distance", "sign", "vicinity_mask"})
+        self.assertEqual(set(world_line_cache), {"distance", "sign", "vicinity_mask"})
+        self.assertEqual(image_line_cache["distance"].shape, world_line_cache["distance"].shape)
+        self.assertEqual(image_polygon_cache["area_1"].shape, world_polygon_cache["area_1"].shape)
+        self.assertTrue(bool(image_line_cache["vicinity_mask"][0, 0]))
+        self.assertTrue(bool(world_line_cache["vicinity_mask"][0, 0]))
+
     def test_geometry_lines_and_areas_load_from_geometry_section(self):
         cfg = _config()
         areas = build_areas(cfg, num_classes=4)
@@ -341,7 +376,7 @@ class PeriodRuntimeTest(unittest.TestCase):
 
         self.assertNotIn("density", areas[0].eligible_metrics)
         self.assertNotIn("space_headway", areas[0].eligible_metrics)
-        self.assertEqual(areas[0].ineligible_metrics["density"], "world coordinates unavailable")
+        self.assertEqual(areas[0].ineligible_metrics["density"], "world-space coordinates unavailable")
 
     def test_image_or_world_metrics_remain_available_without_homography(self):
         cfg = _config()

@@ -16,16 +16,16 @@ except Exception:
     _HAS_YAML = False
 
 
-Pixel = Tuple[float, float]    # (x,y) pixels
-World = Tuple[float, float]    # (X,Y) meters
+Pixel = Tuple[float, float]    # image-space (x, y) pixels
+World = Tuple[float, float]    # world-space (X, Y) meters
 
 
 @dataclass(frozen=True)
 class Calibration:
     """
     Immutable container for a calibration/homography.
-    - homography: 3x3 np.ndarray mapping image (pixels) -> world (meters)
-    - homography_inv: inverse (world -> image)
+    - homography: 3x3 np.ndarray mapping image-space pixels -> world-space meters
+    - homography_inv: inverse world-space -> image-space mapping
     - units: usually "meters"
     - timestamp: epoch seconds when created
     - source: string describing how this calibration was produced
@@ -98,10 +98,10 @@ def compute_homography(
     units: str = "meters",
 ) -> Calibration:
     """
-    Compute homography that maps image_points -> world_points.
+    Compute homography that maps image-space points to world-space points.
 
-    - image_points: list of (x,y) pixel coordinates
-    - world_points: list of (X,Y) world coordinates in meters (must lie on the plane)
+    - image_points: list of image-space (x, y) pixel coordinates
+    - world_points: list of world-space (X, Y) coordinates in meters (must lie on the plane)
     - method: "ransac" or "ls" (least-squares)
     - ransac_thresh_px: threshold for RANSAC reprojection in pixels
     """
@@ -205,7 +205,7 @@ class Homography:
 
     def project_pixels_to_world(self, pixels: Sequence[Pixel]) -> np.ndarray:
         """
-        pixels -> Nx2 world coordinates (meters)
+        Image-space pixels -> Nx2 world-space coordinates in meters.
         Returns Nx2 float64 array.
         """
         arr = np.asarray(pixels, dtype=np.float32)
@@ -216,7 +216,7 @@ class Homography:
 
     def project_world_to_pixels(self, world_points: Sequence[World]) -> np.ndarray:
         """
-        world (meters) -> Nx2 pixels
+        World-space meters -> Nx2 image-space pixels.
         """
         arr = np.asarray(world_points, dtype=np.float32)
         if arr.ndim == 1:
@@ -260,13 +260,13 @@ class Homography:
         - meters_per_pixel: scale for bird image (meters -> pixels)
         Returns warped image of shape (dst_h, dst_w, C).
         Implementation detail:
-          M = A @ H_img2world, where A maps world (meters) -> bird_image pixels.
+          M = A @ H_img2world, where A maps world-space meters -> bird_image pixels.
         """
         dst_w, dst_h = dst_size
         s = 1.0 / float(meters_per_pixel)  # pixels per meter
         X0, Y0 = float(origin_world[0]), float(origin_world[1])
 
-        # A: world (meters) -> bird pixels
+        # A: world-space meters -> bird pixels
         A = np.array([
             [s, 0.0, -s * X0],
             [0.0, s, -s * Y0],
@@ -282,13 +282,13 @@ class Homography:
 
     def project_bboxes_to_world(self, bboxes: np.ndarray) -> np.ndarray:
         """
-        Convert Nx4 bounding boxes from pixel coordinates to world coordinates.
+        Convert Nx4 bounding boxes from image-space pixels to world-space coordinates.
     
         Args:
-            bboxes: Nx4 array-like, each row = (x1, y1, x2, y2) in pixels
+            bboxes: Nx4 array-like, each row = (x1, y1, x2, y2) in image-space pixels
     
         Returns:
-            Nx4 ndarray of world coordinates, same order: (X1, Y1, X2, Y2)
+            Nx4 ndarray of world-space coordinates, same order: (X1, Y1, X2, Y2)
         """
         bboxes = np.asarray(bboxes, dtype=np.float32)
         if bboxes.ndim != 2 or bboxes.shape[1] != 4:
@@ -309,19 +309,17 @@ class Homography:
 
     def project_polygon_to_world(self, polygon: np.ndarray) -> np.ndarray:
         """
-        Projette un polygone du repère image (pixels) vers le repère monde (mètres).
+        Convert polygon vertices from image-space pixels to world-space meters.
     
         Args:
-            polygon: (N, 2) array-like de sommets (x, y) en pixels.
+            polygon: (N, 2) array-like image-space vertices in pixels.
     
         Returns:
-            (N, 2) ndarray des sommets correspondants (X, Y) en mètres.
+            (N, 2) ndarray of corresponding world-space vertices in meters.
         """
         polygon = np.asarray(polygon, dtype=np.float32)
         if polygon.ndim != 2 or polygon.shape[1] != 2:
-            raise ValueError("polygon doit avoir la forme (N, 2)")
+            raise ValueError("polygon must have shape (N, 2)")
     
         world_pts = cv2.perspectiveTransform(polygon.reshape(-1, 1, 2), self._H)
         return world_pts.reshape(-1, 2).astype(np.float64)
-
-

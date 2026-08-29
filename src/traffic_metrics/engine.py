@@ -4,7 +4,8 @@ from typing import Dict
 
 import numpy as np
 
-from geometry.primitives import GeometryEngine, SpatialLine, SpatialPolygon
+from geometry.engine import GeometryEngine
+from geometry.primitives import Line, Polygon
 from runtime.coordinates import CoordinateTransformer
 from runtime.continuity import (
     AnalyticsContinuityContext,
@@ -53,6 +54,7 @@ class PeriodAnalyticsEngine:
 
         self.coordinate_policy = cfg.get("geometry", {}).get("coordinate_space", "image")
         self.transformer = CoordinateTransformer.from_config(cfg)
+        self.world_line_vicinity_threshold = _world_line_vicinity_threshold(cfg)
         self.coordinate_space = self._resolve_coordinate_space()
         if self.coordinate_space == "world":
             self.geometry_engine = self._build_world_geometry_engine(geometry_engine)
@@ -349,44 +351,60 @@ class PeriodAnalyticsEngine:
 
     def _all_world_vicinity_available(self) -> bool:
         for area in self.areas:
-            if area.flow_line is not None and area.flow_line.vicinity_world_m is None:
+            if area.flow_line is not None and self.world_line_vicinity_threshold is None:
                 return False
         return True
 
     def _build_world_geometry_engine(self, image_geometry_engine) -> GeometryEngine:
         if not self._all_world_vicinity_available():
             raise ValueError(
-                "world coordinate geometry requires every active flow line to define vicinity.world_m"
+                "world-space geometry requires every active flow line to define vicinity.world_m"
             )
 
         lines = {}
         for line_id in image_geometry_engine._line_ids:
             line = image_geometry_engine._lines[line_id]
-            lines[line_id] = SpatialLine(
+            lines[line_id] = Line(
                 line_id=line.line_id,
-                points=self.transformer.line_to_world(line.points),
-                vicinity_world_m=line.vicinity_world_m,
+                points=_as_point_tuples(self.transformer.line_to_world(line.points)),
             )
 
         polygons = {}
         for polygon_id, polygon in image_geometry_engine._polygons.items():
-            polygons[polygon_id] = SpatialPolygon(
+            polygons[polygon_id] = Polygon(
                 polygon_id=polygon_id,
-                points=self.transformer.polygon_to_world(polygon.points),
-                distance_meters=polygon.distance_meters,
+                points=_as_point_tuples(self.transformer.polygon_to_world(polygon.points)),
             )
+
+        threshold = 0.0 if self.world_line_vicinity_threshold is None else float(self.world_line_vicinity_threshold)
+        line_thresholds = {
+            line_id: threshold
+            for line_id in lines
+        }
 
         return GeometryEngine(
             lines=lines,
             polygons=polygons,
-            frame_size=1,
             polygon_mode=image_geometry_engine._polygon_mode,
             coordinate_space="world",
+            line_vicinity_thresholds=line_thresholds,
         )
 
 
 def _metric_config(cfg: dict, metric_name: str) -> dict:
     return cfg.get("metrics", {}).get(metric_name, {})
+
+
+def _world_line_vicinity_threshold(cfg: dict) -> float | None:
+    value = cfg.get("geometry", {}).get("vicinity", {}).get("world_m")
+    return None if value is None else float(value)
+
+
+def _as_point_tuples(points: np.ndarray):
+    return [
+        (float(x), float(y))
+        for x, y in np.asarray(points, dtype=np.float64)
+    ]
 
 
 def _empty_crossing_arrays() -> Dict[str, np.ndarray]:

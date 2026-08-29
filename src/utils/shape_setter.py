@@ -210,7 +210,7 @@ class PointSelector(ShapeSelectorBase):
 
     def select_point(self, img: np.ndarray) -> Optional[List[int]]:
         """
-        Starts the selection process and returns the chosen point in original image coordinates as [x, y].
+        Starts the selection process and returns the chosen point in original image-space coordinates as [x, y].
         """
         self._run_selection(img)
         if self._cancelled:
@@ -556,7 +556,7 @@ class RectangleSelector(ShapeSelectorBase):
     def select_rectangle(self, img: np.ndarray) -> Optional[List[List[int]]]:
         """
         Starts the selection process and returns the four corner points of the rectangle
-        in original image coordinates as [[tl], [tr], [br], [bl]].
+        in original image-space coordinates as [[tl], [tr], [br], [bl]].
         """
         self._run_selection(img)
         if self._cancelled:
@@ -671,7 +671,7 @@ class OBBSelector(ShapeSelectorBase):
     def select_obb(self, img: np.ndarray) -> Optional[List[List[int]]]:
         """
         Starts the selection process and returns the four corner points of the OBB
-        in original image coordinates as [[x,y], ...].
+        in original image-space coordinates as [[x,y], ...].
         """
         self._run_selection(img)
         if self._cancelled:

@@ -91,7 +91,7 @@ def estimate_density(
     num_classes: int,
 ) -> DensityResult:
     empty = np.zeros(num_classes, dtype=np.float32)
-    if polygon_mask is None or area.zone.distance_meters is None or area.zone.distance_meters <= 0:
+    if polygon_mask is None or area.distance_meters is None or area.distance_meters <= 0:
         return DensityResult(
             average_density=0.0,
             average_density_by_class=empty.copy(),
@@ -104,7 +104,7 @@ def estimate_density(
         mask=active_mask & polygon_mask,
         num_classes=num_classes,
     )
-    densities = counts_by_frame_class / float(area.zone.distance_meters)
+    densities = counts_by_frame_class / float(area.distance_meters)
 
     if densities.shape[0] == 0:
         return DensityResult(

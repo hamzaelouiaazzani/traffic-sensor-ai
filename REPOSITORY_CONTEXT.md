@@ -165,7 +165,7 @@ Supported `area_type` values:
 
 `src/geometry/primitives.py::Area` validates `area_type`.
 
-Homography is centralized in `src/runtime/coordinates.py`. Static lines and polygons are transformed once during `PeriodAnalyticsEngine` initialization when world coordinates are selected. Dynamic batch `points` and `bboxes` are transformed vectorially once in Stage 2. Individual metrics must not call homography.
+Homography is centralized in `src/runtime/coordinates.py`. Static lines and polygons are transformed once during `PeriodAnalyticsEngine` initialization when world-space coordinates are selected. Dynamic batch `points` and `bboxes` are transformed vectorially once in Stage 2. Individual metrics must not call homography.
 
 The geometry subsystem owns all spatial reasoning in both image and world modes:
 
@@ -175,7 +175,7 @@ The geometry subsystem owns all spatial reasoning in both image and world modes:
 - polygon membership,
 - spatial cache shape and semantics.
 
-`src/geometry/primitives.py::GeometryEngine` exposes the single Stage 2 spatial-computation contract. Image-space engines use raster polygon masks and pixel-scaled vicinity thresholds. World-space engines use transformed `SpatialLine` / `SpatialPolygon` inputs, metric thresholds, and vectorized point-in-polygon logic from `src/geometry/spatial.py`. Both paths return the same `(line_cache, polygon_cache)` structure.
+`src/geometry/engine.py::GeometryEngine` exposes the single Stage 2 spatial-computation contract. `src/geometry/primitives.py` defines only coordinate-agnostic primitives: `Line`, `Polygon`, and `Area`. Image-space engines use raster polygon masks and pixel-scaled vicinity thresholds. World-space engines use the same primitive types after centralized coordinate transformation, metric thresholds, and vectorized point-in-polygon logic from `src/geometry/spatial.py`. Both paths return the same `(line_cache, polygon_cache)` structure.
 
 `src/traffic_metrics/engine.py::PeriodAnalyticsEngine` selects the coordinate space, invokes `CoordinateTransformer` when needed, delegates all spatial cache computation to `GeometryEngine`, then derives events and dispatches metric estimators.
 
@@ -183,7 +183,7 @@ Coordinate policy:
 
 - `image`: no homography, image-space geometry.
 - `world`: requires enabled homography and calibration file.
-- `auto`: selects world when enabled homography and world vicinity are available; otherwise image.
+- `auto`: selects world-space when enabled homography and world-space vicinity are available; otherwise image-space.
 
 ## Area x Metric Eligibility
 
@@ -205,9 +205,9 @@ Supported scopes:
 Supported coordinate requirements:
 
 - `image_or_world`: allowed in image or world space.
-- `world_required`: allowed only when world coordinates are configured and available.
+- `world_required`: allowed only when world-space coordinates are configured and available.
 
-World-required metrics are not silently computed in image coordinates.
+World-required metrics are not silently computed in image-space coordinates.
 
 ## Metric Backend Status
 
@@ -216,10 +216,10 @@ Current status under the redesigned config:
 | Metric | Status | Notes |
 |---|---|---|
 | `flow` | Implemented | Uses line crossing/vicinity masks and detector-derived class vector size. |
-| `density` | Implemented when world coordinates are available | Skipped in image mode because config marks it `world_required`. |
+| `density` | Implemented when world-space coordinates are available | Skipped in image mode because config marks it `world_required`. |
 | `space_occupancy` | Architecture-only / not implemented | Skipped with an ineligible reason; no validated backend exists yet. |
 | `time_occupancy` | Implemented | Maps to the existing temporal occupancy semantics: fraction of frames occupied near line and inside zone. |
-| `space_headway` | Implemented when world coordinates are available and area is lane | Skipped outside lane or without world coordinates. |
+| `space_headway` | Implemented when world-space coordinates are available and area is lane | Skipped outside lane or without world-space coordinates. |
 | `time_headway` | Implemented | Lane-only, image or world. Preserves cross-period last crossing timestamp. |
 | `speed` | Architecture-only / not implemented | No validated speed metric backend was found; config support is extensible but computation is skipped. |
 
@@ -282,8 +282,9 @@ Do not add separate crossing/counter TTLs.
 | `src/traffic_metrics/engine.py` | Stage 2 vectorized analytics orchestration. |
 | `src/traffic_metrics/models.py` | Traffic analytics/result contracts. |
 | `src/traffic_metrics/estimators.py` | Current vectorized traffic metric algorithms. |
-| `src/geometry/primitives.py` | Line, Polygon, transformed spatial primitives, typed Area, GeometryEngine. |
-| `src/geometry/spatial.py` | Shared image/world spatial algorithms used by GeometryEngine. |
+| `src/geometry/primitives.py` | Coordinate-agnostic Line, Polygon, and typed Area primitives. |
+| `src/geometry/spatial.py` | Shared spatial algorithms plus image-space and world-space implementations used by GeometryEngine. |
+| `src/geometry/engine.py` | Single spatial cache contract for image-space and world-space geometry. |
 | `src/detection/*` | Detector adapters and metadata contract. |
 | `src/tracking/track.py` | BoxMOT tracker wrapper. |
 | `src/video_io/frame_producer.py` | Direct, sampled offline, and real-time simulation producers. |
@@ -307,7 +308,7 @@ C:\Users\hamza\anaconda3\Scripts\conda.exe run -n smart_sensor python -m unittes
 Latest test result:
 
 ```text
-Ran 31 tests
+Ran 33 tests
 OK
 ```
 

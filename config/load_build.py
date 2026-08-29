@@ -3,7 +3,8 @@ from typing import Dict, List, Optional, Tuple
 
 import yaml
 
-from geometry.primitives import Area, GeometryEngine, Line, Polygon
+from geometry.engine import GeometryEngine
+from geometry.primitives import Area, Line, Polygon
 
 
 SUPPORTED_AREA_TYPES = {"lane", "direction", "mixed", "entire"}
@@ -138,20 +139,20 @@ def has_world_coordinate_capability(cfg: dict) -> bool:
 def build_area(
     area_cfg: dict,
     lines_by_id: Dict[str, dict],
-    cfg: dict,
 ) -> Area:
     area_type = area_cfg["area_type"]
     if area_type not in SUPPORTED_AREA_TYPES:
         raise ValueError(f"Unsupported area_type '{area_type}'")
 
     polygon = None
+    distance_meters = None
     if "zone" in area_cfg:
         zone_cfg = area_cfg["zone"]
         polygon = Polygon(
             polygon_id=area_cfg["area_id"],
             points=zone_cfg["points"],
-            distance_meters=zone_cfg.get("distance_meters"),
         )
+        distance_meters = zone_cfg.get("distance_meters")
 
     flow_line = None
     flow_line_id = area_cfg.get("flow_line_id")
@@ -160,12 +161,9 @@ def build_area(
         if line_cfg is None:
             raise ValueError(f"Line '{flow_line_id}' not found")
 
-        vicinity_image, vicinity_world_m = get_global_vicinity(cfg)
         flow_line = Line(
             line_id=line_cfg["line_id"],
             points=line_cfg["points"],
-            vicinity=vicinity_image,
-            vicinity_world_m=vicinity_world_m,
         )
 
     return Area(
@@ -176,6 +174,7 @@ def build_area(
         description=area_cfg.get("description", ""),
         flow_line=flow_line,
         zone=polygon,
+        distance_meters=distance_meters,
     )
 
 
@@ -216,7 +215,7 @@ def resolve_eligible_metrics(
             continue
 
         if coordinate_requirement == "world_required" and not world_coordinates_available:
-            rejected[metric_name] = "world coordinates unavailable"
+            rejected[metric_name] = "world-space coordinates unavailable"
             continue
 
         if capability.requires_zone and area.zone is None:
@@ -256,7 +255,6 @@ def build_areas(
         area = build_area(
             area_cfg=area_cfg,
             lines_by_id=lines_by_id,
-            cfg=cfg,
         )
         area.eligible_metrics, area.ineligible_metrics = resolve_eligible_metrics(
             area=area,
@@ -282,10 +280,18 @@ def build_geometry_engine(
         if area.zone is not None:
             polygons[area.zone.polygon_id] = area.zone
 
+    image_vicinity, _ = get_global_vicinity(cfg)
+    frame_size = get_frame_size_reference(cfg)
+    threshold = 0.0 if image_vicinity is None else float(image_vicinity) * frame_size
+    line_thresholds = {
+        line_id: threshold
+        for line_id in lines
+    }
+
     return GeometryEngine(
         lines=lines,
         polygons=polygons,
-        frame_size=get_frame_size_reference(cfg),
         polygon_mode=get_polygon_membership_mode(cfg),
         coordinate_space="image",
+        line_vicinity_thresholds=line_thresholds,
     )

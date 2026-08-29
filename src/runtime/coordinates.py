@@ -9,7 +9,7 @@ from geometry.homography import Homography, load_calibration
 
 
 class CoordinateTransformer:
-    """Centralized vectorized image/world coordinate transformation."""
+    """Centralized vectorized image-space/world-space coordinate transformation."""
 
     def __init__(self, calibration_file: str):
         self.calibration_file = str(calibration_file)
