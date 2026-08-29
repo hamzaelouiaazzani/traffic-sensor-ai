@@ -98,7 +98,7 @@ class SensorDaemon:
         sensor_id: str = "camera_1",
         config_path: str = "config/traffic_metrics.yaml",
         fps: Optional[float] = None,
-        period_mins: float = 5.0,
+        period_mins: Optional[float] = None,
         offline_queue_dir: str = "outputs/pending_mqtt",
         topic_root: str = "sensors",
     ):
@@ -352,7 +352,7 @@ def parse_args():
     parser.add_argument("--source", "--video", dest="source", required=True)
     parser.add_argument("--config", default="config/traffic_metrics.yaml")
     parser.add_argument("--fps", type=float, default=None)
-    parser.add_argument("--period-mins", type=float, default=5.0)
+    parser.add_argument("--period-mins", type=float, default=None)
     parser.add_argument("--sensor-id", default="camera_1")
     parser.add_argument("--topic-root", default="sensors")
     parser.add_argument("--mqtt-broker-host", required=True)

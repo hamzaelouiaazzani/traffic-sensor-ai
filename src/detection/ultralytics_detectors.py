@@ -5,7 +5,7 @@ import numpy as np
 
 from ultralytics import YOLO , RTDETR
 
-from detection.interface import IDetector
+from detection.interface import DetectorError, IDetector, normalize_class_names
 from ultralytics.utils.checks import check_imgsz
 
 
@@ -19,6 +19,7 @@ class UltralyticsDetector(IDetector):
             raise DetectorError(f"Unsupported model family for {model_name}")
 
         model = detector_family(Path(model_name))
+        self._class_names = normalize_class_names(model.names)
         
         custom = {"conf": 0.25, "batch": 1, "save": False, "mode": "predict", "rect": True, "verbose": True , "imgsz": [640]}
         args = {**model.overrides, **custom, **kwargs}
@@ -32,6 +33,14 @@ class UltralyticsDetector(IDetector):
         imgsz = args["imgsz"]
         self.warmup(imgsz)
         print(f"Successfully {model_name} model is initialized and warmedup !")
+
+    @property
+    def class_names(self):
+        return self._class_names
+
+    @property
+    def num_classes(self):
+        return len(self._class_names)
 
 
 

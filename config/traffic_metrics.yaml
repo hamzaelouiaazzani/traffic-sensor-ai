@@ -1,20 +1,39 @@
-# configs/traffic_metrics.yaml
-
-
-frame_grabber:
+input:
   source: "C:\\Users\\hamza\\Datasets\\TrafficDatasets\\IMAROC_2\\kech38.mp4"
-  stride: 1
-  stride_method: "periodic_stride"
-  window_size: null
-  grabber_mode: "latest"
-  queue_maxsize: 4
-  fallback_fps: 30
-  allow_dynamic_resolution: false
-  
+  fps: 30
+
+
+frame_processing:
+  producer: "direct"     # direct | sampled_offline | realtime_simulation
+
+  sampling:
+    enabled: false
+    policy: "every_frame"
+    stride: 1
+
+
+timing:
+  mode: "frame"          # frame | unix
+
+
+analytics:
+  period_seconds: 300
+  max_obs_per_frame: 50
+
+
+continuity:
+  enabled: true
+  max_age_seconds: 30
+
+
+homography:
+  enabled: false
+  calibration_file: null
+
 
 detector:
   model_name: "yolo11n_finetuned"
-  confidence: 0.50    
+  confidence: 0.50
 
 
 tracker:
@@ -24,119 +43,100 @@ tracker:
   device: "cuda"
   half: true
   per_class: true
-  
 
-lines:
-  - line_id: "line_1"
-    points: [[1905, 365], [9, 687]]
-    vicinity: 0.15
 
-  - line_id: "line_2"
-    points: [[11, 506], [917, 768]]
-    vicinity: 0.1
+geometry:
+  coordinate_space: "image"      # image | world | auto
+  frame_size_reference: 1000
+  polygon_membership_mode: "center"
 
-  - line_id: "line_3"
-    points: [[1675, 361], [2, 521]]
-    vicinity: 0.1
-    
-    
-areas:
-  - area_id: "area_1"
-    name: "Lane_1/Direction_1"
-    enable: true
-    description: "This is Lane_1 of Direction_1"
+  vicinity:
+    image: 0.15
+    world_m: 2
 
-    metrics:
-      - flow
-      - density
-      - occupancy
-      - space_headway
-      - time_headway
+  lines:
+    - line_id: "line_1"
+      points: [[1905, 365], [9, 687]]
 
-    zone:
-      points: [[988, 66], [1207, 32], [1909, 544], [1914, 1056], [1653, 1058]]
-      distance_meters: 8
+    - line_id: "line_2"
+      points: [[11, 506], [917, 768]]
 
-    flow_line_id: "line_1"
+    - line_id: "line_3"
+      points: [[1675, 361], [2, 521]]
 
-  - area_id: "area_2"
-    name: "Lane_2/Direction_1"
-    enable: true
-    description: "This is Lane_2 of Direction_1"
+  areas:
+    - area_id: "area_1"
+      area_type: "lane"          # lane | direction | mixed | entire
+      enabled: true
+      zone:
+        points: [[988, 66], [1207, 32], [1909, 544], [1914, 1056], [1653, 1058]]
+        distance_meters: 8
+      flow_line_id: "line_1"
 
-    metrics:
-      - flow
-      - density
-      - occupancy
-      - space_headway
-      - time_headway
+    - area_id: "area_2"
+      area_type: "lane"
+      enabled: true
+      zone:
+        points: [[988, 87], [826, 96], [1067, 1058], [1655, 1060]]
+        distance_meters: 8
+      flow_line_id: "line_1"
 
-    zone:
-      points: [[988, 87], [826, 96], [1067, 1058], [1655, 1060]]
-      distance_meters: 8
+    - area_id: "area_3"
+      area_type: "lane"
+      enabled: true
+      zone:
+        points: [[962, 1056], [798, 119], [576, 111], [297, 1065]]
+        distance_meters: 8
+      flow_line_id: "line_1"
 
-    flow_line_id: "line_1"
+    - area_id: "area_4"
+      area_type: "lane"
+      enabled: true
+      zone:
+        points: [[567, 141], [60, 13], [2, 634], [2, 1067], [292, 1067]]
+        distance_meters: 8
+      flow_line_id: "line_1"
 
-  - area_id: "area_3"
-    name: "Lane_1/Direction_2"
-    enable: true
-    description: "This is Lane_1 of Direction_2"
-
-    metrics:
-      - flow
-      - density
-      - occupancy
-      - space_headway
-      - time_headway
-
-    zone:
-      points: [[962, 1056], [798, 119], [576, 111], [297, 1065]]
-      distance_meters: 8
-
-    flow_line_id: "line_1"
-
-  - area_id: "area_4"
-    name: "Lane_2/Direction_2"
-    enable: true
-    description: "This is Lane_2 of Direction_2"
-
-    metrics:
-      - flow
-      - density
-      - occupancy
-      - space_headway
-      - time_headway
-
-    zone:
-      points: [[567, 141], [60, 13], [2, 634], [2, 1067], [292, 1067]]
-      distance_meters: 8
-
-    flow_line_id: "line_1"
-
-  - area_id: "area_5"
-    name: "Global_Stream"
-    enable: true
-    description: "Global monitoring area"
-
-    metrics:
-      - flow
-
-    flow_line_id: "line_1"
-    
+    - area_id: "area_5"
+      area_type: "entire"
+      enabled: true
+      flow_line_id: "line_1"
 
 
 metrics:
   flow:
-    counter_logic: "counter_5"
-    ttl_seconds: 30
-    
+    enabled: true
+    spatial_scope: "any_area"
+    coordinate_requirement: "image_or_world"
+    counter:
+      logic: "crossed_or_vicinity"
 
+  density:
+    enabled: true
+    spatial_scope: "any_area"
+    coordinate_requirement: "world_required"
 
-general_params:
-    # workflow_mode: "all_in_edge"                                      
-    # time_base: "by_frame"                            # "by_frame" or "by_timestamp"  
-    frame_size: 1000
-    fps: 30
-    num_classes: 4
-    crossing_ttl: 30
-        
+  space_occupancy:
+    enabled: true
+    spatial_scope: "any_area"
+    coordinate_requirement: "world_required"
+
+  time_occupancy:
+    enabled: true
+    spatial_scope: "any_area"
+    coordinate_requirement: "image_or_world"
+
+  space_headway:
+    enabled: true
+    spatial_scope: "lane_only"
+    coordinate_requirement: "world_required"
+
+  time_headway:
+    enabled: true
+    spatial_scope: "lane_only"
+    coordinate_requirement: "image_or_world"
+
+  speed:
+    enabled: true
+    spatial_scope: "any_area"
+    coordinate_requirement: "world_required"

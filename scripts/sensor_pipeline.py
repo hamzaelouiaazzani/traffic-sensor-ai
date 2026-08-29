@@ -1,122 +1,44 @@
 from threading import Event
 from typing import Optional
 
-import numpy as np
-import torch
-
 from config.load_build import (
     build_areas,
-    build_runtime_components,
+    build_geometry_engine,
+    get_input_fps,
+    get_input_source,
     load_config,
 )
 from communication.mqtt_client import SmartSensorMqttClient
 from communication.services import LatestFrameStore, MetricsPublisherService
 from communication.topics import SensorTopics
 from detection.factory import build_detector
+from runtime.continuity import AnalyticsContinuityContext
+from runtime.periods import (
+    resolve_period_policy,
+    resolve_period_seconds as resolve_policy_period_seconds,
+)
+from runtime.stage1 import (
+    extract_tracking_outputs as _extract_tracking_outputs,
+    process_stage1_period,
+)
+from runtime.timing import TimingPolicy
 from tracking.track import Tracker
+from traffic_metrics.engine import PeriodAnalyticsEngine
 from utils.profilers import Profile
-from video_io.frame_producer import DirectFrameProducer
+from video_io.frame_producer import (
+    DirectFrameProducer,
+    OfflineSampledFrameProducer,
+    RealTimeSimulationProducer,
+)
 
 
-def extract_tracking_outputs(tracks: np.ndarray):
-    if tracks is None or len(tracks) == 0:
-        return (
-            np.empty((0, 2), dtype=np.float32),
-            np.empty((0, 4), dtype=np.float32),
-            np.empty((0,), dtype=np.int32),
-            np.empty((0,), dtype=np.int32),
-        )
-
-    bboxes = tracks[:, :4]
-
-    points = np.empty((bboxes.shape[0], 2), dtype=np.float32)
-    points[:, 0] = (bboxes[:, 0] + bboxes[:, 2]) * 0.5
-    points[:, 1] = bboxes[:, 3]
-
-    track_ids = tracks[:, 4].astype(np.int32)
-    det_cls = tracks[:, 6].astype(np.int32)
-
-    return points, bboxes, track_ids, det_cls
+def extract_tracking_outputs(tracks):
+    return _extract_tracking_outputs(tracks)
 
 
-def compute_area_metrics(
-    areas,
-    geometry_engine,
-    points,
-    track_ids,
-    det_cls,
-    current_time,
-    line_cache,
-    polygon_cache,
-    crossed_masks,
-    new_crossings,
-):
-    results = {}
-
-    for area in areas:
-        area_results = {}
-
-        polygon_mask = None
-        if area.zone is not None:
-            polygon_mask = polygon_cache[area.zone.polygon_id]
-
-        crossed_mask = None
-        vicinity_mask = None
-        new_area_crossings = []
-
-        if area.flow_line is not None:
-            line_idx = geometry_engine._line_id_to_idx[area.flow_line.line_id]
-            crossed_mask = crossed_masks[line_idx]
-            vicinity_mask = line_cache["vicinity_mask"][line_idx]
-            new_area_crossings = new_crossings.get(area.area_id, [])
-
-        if "flow" in area.metrics:
-            counter_res = area.metrics["counter"].compute(
-                track_ids=track_ids,
-                det_cls=det_cls,
-                current_time=current_time,
-                crossed_mask=crossed_mask,
-                vicinity_mask=vicinity_mask,
-                polygon_mask=polygon_mask,
-            )
-
-            area_results["flow"] = area.metrics["flow"].compute(
-                cumulative_count=counter_res.cumulative_count,
-                cumulative_counts_by_class=counter_res.cumulative_counts_by_class,
-                current_time=current_time,
-            )
-
-        if "density" in area.metrics:
-            area_results["density"] = area.metrics["density"].compute(
-                polygon_mask=polygon_mask,
-                det_cls=det_cls,
-            )
-
-        if "occupancy" in area.metrics:
-            area_results["occupancy"] = area.metrics["occupancy"].compute(
-                vicinity_mask=vicinity_mask,
-                polygon_mask=polygon_mask,
-            )
-
-        if "space_headway" in area.metrics:
-            area_results["space_headway"] = area.metrics["space_headway"].compute(
-                points=points,
-                polygon_mask=polygon_mask,
-            )
-
-        if "time_headway" in area.metrics:
-            area_results["time_headway"] = area.metrics["time_headway"].compute(
-                new_area_crossings
-            )
-
-        results[area.area_id] = area_results
-
-    return results
-
-
-def build_period_state(cfg):
-    areas = build_areas(cfg)
-    geometry_engine, crossing_estimator = build_runtime_components(areas, cfg)
+def build_runtime_state(cfg: dict, fps: float, detector):
+    areas = build_areas(cfg, num_classes=detector.num_classes)
+    geometry_engine = build_geometry_engine(areas, cfg)
 
     tracker = Tracker(
         method=cfg["tracker"]["method"],
@@ -127,111 +49,141 @@ def build_period_state(cfg):
         per_class=cfg["tracker"]["per_class"],
     )
 
-    return areas, geometry_engine, crossing_estimator, tracker
+    timing_policy = TimingPolicy.from_config(cfg, fps_override=fps)
+    analytics_engine = PeriodAnalyticsEngine(
+        areas=areas,
+        geometry_engine=geometry_engine,
+        cfg=cfg,
+        num_classes=detector.num_classes,
+    )
+    continuity = AnalyticsContinuityContext()
+
+    return tracker, timing_policy, analytics_engine, continuity
+
+
+def build_frame_producer(source: str, cfg: dict, fps: float):
+    frame_cfg = cfg.get("frame_processing", {})
+    sampling_cfg = frame_cfg.get("sampling", {})
+    sampling_enabled = bool(sampling_cfg.get("enabled", False))
+    producer_type = frame_cfg.get("producer", "direct")
+
+    if producer_type == "direct" and sampling_enabled:
+        producer_type = "sampled_offline"
+
+    if producer_type == "direct":
+        return DirectFrameProducer(source)
+
+    if producer_type == "sampled_offline":
+        effective_fps, sampling_type = resolve_sampling_settings(sampling_cfg, fps)
+        return OfflineSampledFrameProducer(
+            source=source,
+            fps=fps,
+            effective_fps=effective_fps,
+            sampling_type=sampling_type,
+            window_size=int(sampling_cfg.get("window_size") or 30),
+        )
+
+    if producer_type == "realtime_simulation":
+        return RealTimeSimulationProducer(source)
+
+    raise ValueError(
+        f"Unsupported frame_processing.producer '{producer_type}'. "
+        "Supported values: direct, sampled_offline, realtime_simulation."
+    )
+
+
+def resolve_sampling_settings(sampling_cfg: dict, fps: float):
+    policy = sampling_cfg.get("policy", "every_frame")
+    stride = int(sampling_cfg.get("stride", 1))
+    if stride <= 0:
+        raise ValueError("frame_processing.sampling.stride must be positive")
+
+    if policy in {"every_frame", "none"}:
+        return float(fps), "deterministic"
+
+    if policy in {"fixed_stride", "periodic", "periodic_stride", "periodic_sampling"}:
+        return float(sampling_cfg.get("effective_fps") or (fps / stride)), "deterministic"
+
+    if policy in {"burst", "burst_sampling"}:
+        return float(sampling_cfg.get("effective_fps") or (fps * max(stride - 1, 1) / stride)), "deterministic"
+
+    if policy in {"random", "random_sampling"}:
+        effective_fps = float(sampling_cfg.get("effective_fps") or fps)
+        return effective_fps, "stochastic"
+
+    raise ValueError(f"Unsupported frame_processing.sampling.policy '{policy}'")
 
 
 def process_period(
     producer,
     detector,
-    cfg,
-    fps,
-    period_frames,
-    period_idx,
+    tracker,
+    timing_policy: TimingPolicy,
+    analytics_engine: PeriodAnalyticsEngine,
+    continuity: AnalyticsContinuityContext,
+    period_seconds: float,
+    max_observations: int,
+    period_idx: int,
     device,
+    stop_event: Optional[Event] = None,
     latest_frame_store: Optional[LatestFrameStore] = None,
 ):
-    areas, geometry_engine, crossing_estimator, tracker = build_period_state(cfg)
+    analytics_profile = Profile()
+    stage1_result = process_stage1_period(
+        producer=producer,
+        detector=detector,
+        tracker=tracker,
+        timing_policy=timing_policy,
+        period_seconds=period_seconds,
+        max_observations=max_observations,
+        period_idx=period_idx,
+        continuity_policy=analytics_engine.continuity_policy,
+        boundary_context=continuity.boundary_batch,
+        device=device,
+        stop_event=stop_event,
+        latest_frame_store=latest_frame_store,
+    )
+    batch = stage1_result.batch
 
-    traffic_metrics_profile = Profile()
-    det_profile = Profile(device=device)
-    track_profile = Profile(device=device)
+    if batch is None:
+        return {
+            "period_idx": period_idx,
+            "start_frame": None,
+            "end_frame": None,
+            "frames_processed": 0,
+            "source_frames_elapsed": 0,
+            "end_of_stream": stage1_result.end_of_stream,
+            "area_metrics": None,
+        }
 
-    first_frame_idx = None
-    last_frame_idx = None
-    area_metrics = None
-    frames_processed = 0
-    source_frames_elapsed = 0
-    end_of_stream = False
-
-    with torch.inference_mode():
-        while True:
-            frame = producer.next_frame()
-
-            if frame is None:
-                end_of_stream = True
-                break
-
-            if first_frame_idx is None:
-                first_frame_idx = frame.read_idx
-
-            if latest_frame_store is not None:
-                latest_frame_store.update(frame.data, frame.read_idx)
-
-            print(frame.read_idx)
-            last_frame_idx = frame.read_idx
-            frames_processed += 1
-            source_frames_elapsed = frame.read_idx - first_frame_idx + 1
-            current_time = max(
-                source_frames_elapsed / fps,
-                1.0 / fps,
-            )
-
-            with det_profile:
-                ready_to_track_array = detector.detect_to_track(frame.data)
-
-            with track_profile:
-                tracks = tracker.update(
-                    ready_to_track_array,
-                    frame.data,
-                )
-
-            with traffic_metrics_profile:
-                points, bboxes, track_ids, det_cls = extract_tracking_outputs(tracks)
-
-                line_cache, polygon_cache = geometry_engine.compute(
-                    points,
-                    bboxes,
-                )
-
-                crossed_masks, new_crossings = crossing_estimator.update(
-                    track_ids,
-                    current_time,
-                    line_cache,
-                    polygon_cache,
-                )
-
-                area_metrics = compute_area_metrics(
-                    areas=areas,
-                    geometry_engine=geometry_engine,
-                    points=points,
-                    track_ids=track_ids,
-                    det_cls=det_cls,
-                    current_time=current_time,
-                    line_cache=line_cache,
-                    polygon_cache=polygon_cache,
-                    crossed_masks=crossed_masks,
-                    new_crossings=new_crossings,
-                )
-
-            if source_frames_elapsed >= period_frames:
-                break
+    with analytics_profile:
+        area_metrics = analytics_engine.compute_period(batch, continuity)
 
     return {
         "period_idx": period_idx,
-        "start_frame": first_frame_idx,
-        "end_frame": last_frame_idx,
-        "frames_processed": frames_processed,
-        "source_frames_elapsed": source_frames_elapsed,
-        "end_of_stream": end_of_stream,
+        "start_frame": batch.start_frame,
+        "end_frame": batch.end_frame,
+        "frames_processed": stage1_result.frames_processed,
+        "source_frames_elapsed": batch.source_frames_elapsed,
+        "end_of_stream": stage1_result.end_of_stream,
         "area_metrics": area_metrics,
+        "processing_stats": {
+            "observations": batch.active_observation_count,
+            "context_observations": int(batch.observation_count - batch.active_observation_count),
+            "timing_mode": timing_policy.mode,
+            "period_duration_seconds": batch.duration_seconds,
+            "detection_seconds": stage1_result.detection_seconds,
+            "tracking_seconds": stage1_result.tracking_seconds,
+            "analytics_seconds": analytics_profile.t,
+        },
     }
 
 
 def run_sensor(
-    source: str,
+    source: Optional[str] = None,
     config_path: str = "config/traffic_metrics.yaml",
     fps: Optional[float] = None,
-    period_mins: float = 5.0,
+    period_mins: Optional[float] = None,
     sensor_id: str = "camera_1",
     mqtt_client: Optional[SmartSensorMqttClient] = None,
     stop_event: Optional[Event] = None,
@@ -239,16 +191,22 @@ def run_sensor(
 ) -> None:
     cfg = load_config(config_path)
 
-    fps = fps or cfg["general_params"]["fps"]
-    period_frames = max(1, int(period_mins * 60 * fps))
+    source = resolve_source(cfg, source)
+    fps = resolve_fps(cfg, fps)
+    capacity_fps = resolve_capacity_fps(cfg, fps)
+    period_policy = resolve_period_policy(cfg, capacity_fps, period_mins)
+    period_seconds = period_policy.period_seconds
+    max_observations = period_policy.max_observations
 
     detector = build_detector(
         model_name=cfg["detector"]["model_name"],
         conf=cfg["detector"]["confidence"],
     )
-    device = detector.predictor.device
+    device = resolve_detector_device(detector)
 
-    producer = DirectFrameProducer(source)
+    tracker, timing_policy, analytics_engine, continuity = build_runtime_state(cfg, fps, detector)
+
+    producer = build_frame_producer(source, cfg, fps)
     producer.start()
 
     metrics_publisher = None
@@ -263,11 +221,15 @@ def run_sensor(
             result = process_period(
                 producer=producer,
                 detector=detector,
-                cfg=cfg,
-                fps=fps,
-                period_frames=period_frames,
+                tracker=tracker,
+                timing_policy=timing_policy,
+                analytics_engine=analytics_engine,
+                continuity=continuity,
+                period_seconds=period_seconds,
+                max_observations=max_observations,
                 period_idx=period_idx,
                 device=device,
+                stop_event=stop_event,
                 latest_frame_store=latest_frame_store,
             )
 
@@ -291,3 +253,42 @@ def run_sensor(
 
     finally:
         producer.release()
+        if hasattr(detector, "close"):
+            detector.close()
+
+
+def resolve_source(cfg: dict, source_override: Optional[str]) -> str:
+    if source_override is not None:
+        return source_override
+    return get_input_source(cfg)
+
+
+def resolve_fps(cfg: dict, fps_override: Optional[float]) -> float:
+    fps_value = fps_override or get_input_fps(cfg)
+    fps_value = float(fps_value)
+    if fps_value <= 0:
+        raise ValueError("FPS must be positive")
+    return fps_value
+
+
+def resolve_period_seconds(cfg: dict, period_mins_override: Optional[float]) -> float:
+    return resolve_policy_period_seconds(cfg, period_mins_override)
+
+
+def resolve_capacity_fps(cfg: dict, fps: float) -> float:
+    frame_cfg = cfg.get("frame_processing", {})
+    sampling_cfg = frame_cfg.get("sampling", {})
+    sampling_enabled = bool(sampling_cfg.get("enabled", False))
+    producer_type = frame_cfg.get("producer", "direct")
+
+    if producer_type == "sampled_offline" or (producer_type == "direct" and sampling_enabled):
+        effective_fps, _ = resolve_sampling_settings(sampling_cfg, fps)
+        return effective_fps
+
+    return float(fps)
+
+
+def resolve_detector_device(detector):
+    if hasattr(detector, "predictor") and hasattr(detector.predictor, "device"):
+        return detector.predictor.device
+    return getattr(detector, "device", None)

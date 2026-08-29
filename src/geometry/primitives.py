@@ -1,13 +1,16 @@
+from dataclasses import dataclass
 from pydantic import BaseModel, field_validator, model_validator, Field, PrivateAttr
-from typing import List, Optional, Tuple, Set, Dict, Any, Callable
+from typing import List, Optional, Tuple, Dict
 from math import gcd
 import numpy as np
 
-from utils.helper_functions import (
+from geometry.spatial import (
     polygon_to_mask,
     bbox_center_in_polygon,
     bbox_corners_in_polygon,
     bbox_any_in_polygon,
+    line_coefficients,
+    points_in_polygon,
 )
 
 # --- Basic ---
@@ -41,6 +44,7 @@ class Line(BaseModel):
     line_id: str
     points: Tuple[Point, Point]
     vicinity: Optional[float] = None
+    vicinity_world_m: Optional[float] = None
 
     # =================================================
     # CACHED ATTRIBUTES (PRIVATE)
@@ -64,6 +68,12 @@ class Line(BaseModel):
     def non_negative_vicinity(cls, v):
         if v is not None and v < 0:
             raise ValueError("vicinity must be >= 0")
+        return v
+
+    @field_validator("vicinity_world_m")
+    def non_negative_world_vicinity(cls, v):
+        if v is not None and v < 0:
+            raise ValueError("vicinity_world_m must be >= 0")
         return v
 
     # =================================================
@@ -105,54 +115,6 @@ class Line(BaseModel):
 
 
         
-# --- Speed Line Pair ---
-class SpeedLinePair(BaseModel):
-    
-    line_pair_id: str
-    line1: Line
-    line2: Line
-    distance_meters: float
-
-    @model_validator(mode="after")
-    def normalize_and_validate(self):
-    
-        # distinct check
-        if self.line1.canonical() == self.line2.canonical():
-            raise ValueError("line1 and line2 must be different")
-    
-        return self
-
-    @field_validator("distance_meters")
-    def non_zero_distance(cls, v):
-        if v <= 0:
-            raise ValueError("distance_meters must be > 0")
-        return v    
-    
-    def canonical_pair(self):
-        l1 = self.line1.canonical()
-        l2 = self.line2.canonical()
-        return tuple(sorted([l1, l2]))
-        
-
-    def between_mask_from_cache(self, cache):
-        # get indices of both lines
-        idx1 = self.line1.get_idx()
-        idx2 = self.line2.get_idx()
-    
-        # get signed distances (N,)
-        d1 = cache["distance"][idx1]
-        d2 = cache["distance"][idx2]
-    
-        # between mask: opposite signs or touching
-        mask = ((d1 * d2) <= 0).astype(int)
-    
-        return d1, d2, mask
-
-    
-
-
-
-
 class Polygon(BaseModel):
     """
     Pure geometric polygon primitive.
@@ -268,9 +230,40 @@ class Polygon(BaseModel):
 
 
 
+@dataclass(frozen=True)
+class SpatialLine:
+    """Runtime line primitive for transformed coordinate spaces."""
+
+    line_id: str
+    points: np.ndarray
+    vicinity: Optional[float] = None
+    vicinity_world_m: Optional[float] = None
+
+    def __post_init__(self):
+        points = np.asarray(self.points, dtype=np.float64)
+        if points.shape != (2, 2):
+            raise ValueError("line points must have shape (2, 2)")
+        object.__setattr__(self, "points", points)
+
+
+@dataclass(frozen=True)
+class SpatialPolygon:
+    """Runtime polygon primitive for transformed coordinate spaces."""
+
+    polygon_id: str
+    points: np.ndarray
+    distance_meters: Optional[float] = None
+
+    def __post_init__(self):
+        points = np.asarray(self.points, dtype=np.float64)
+        if points.ndim != 2 or points.shape[1] != 2 or points.shape[0] < 3:
+            raise ValueError("polygon points must have shape (N, 2) with N >= 3")
+        object.__setattr__(self, "points", points)
+
+
 class GeometryEngine:
     """
-    Fully vectorized geometry engine.
+    Fully vectorized geometry engine for image or world coordinates.
     """
 
     # =================================================
@@ -282,17 +275,21 @@ class GeometryEngine:
         polygons: dict,
         frame_size: int = 1000,
         polygon_mode: str = "center",
+        coordinate_space: str = "image",
     ):
 
         # -------------------------
         # CONFIG
         # -------------------------
+        self.coordinate_space = self._normalize_coordinate_space(coordinate_space)
         self._line_ids = list(lines.keys())
 
         self._line_id_to_idx = {
             lid: i
             for i, lid in enumerate(self._line_ids)
         }
+
+        self._lines = lines
 
         self._polygons = polygons
 
@@ -305,17 +302,45 @@ class GeometryEngine:
         self._B = None
         self._C = None
         self._norm = None
-        self._vicinity = None
         self._thresh = None
 
         # -------------------------
         # BUILD CACHE
         # -------------------------
-        # print(f"I am Here before self._build_line_cache")
         self._build_line_cache(
             lines,
             frame_size
         )
+
+    @staticmethod
+    def _normalize_coordinate_space(value: str) -> str:
+        normalized = str(value).lower()
+        if normalized not in {"image", "world"}:
+            raise ValueError("coordinate_space must be one of: image, world")
+        return normalized
+
+    @staticmethod
+    def _line_points(line) -> np.ndarray:
+        return np.asarray(line.points, dtype=np.float64)
+
+    def _line_threshold(self, line, frame_size: int) -> float:
+        if self.coordinate_space == "world":
+            return float(0.0 if line.vicinity_world_m is None else line.vicinity_world_m)
+
+        vicinity = 0.0 if line.vicinity is None else line.vicinity
+        return float(vicinity * frame_size)
+
+    def _line_abc_norm(self, line) -> Tuple[float, float, float, float]:
+        if self.coordinate_space == "image" and hasattr(line, "canonical"):
+            a, b, c = line.canonical()
+            norm = np.sqrt(a * a + b * b)
+            if norm <= 1e-12:
+                raise ValueError("line requires two distinct points")
+            return float(a), float(b), float(c), float(norm)
+
+        coeff = line_coefficients(self._line_points(line))
+        return float(coeff[0]), float(coeff[1]), float(coeff[2]), float(coeff[3])
+
     # =================================================
     # BUILD LINE CACHE
     # =================================================
@@ -332,33 +357,23 @@ class GeometryEngine:
         # Build cache
         # ---------------------------------
     
+        dtype = np.float64 if self.coordinate_space == "world" else np.float32
+
         if L > 0:
     
             ABC = np.array([
-                lines[lid].canonical()
+                self._line_abc_norm(lines[lid])
                 for lid in self._line_ids
-            ], dtype=np.float32)
+            ], dtype=dtype)
     
             self._A = ABC[:, 0]
             self._B = ABC[:, 1]
             self._C = ABC[:, 2]
-    
-            self._norm = np.sqrt(
-                self._A**2 + self._B**2
-            )
-    
-            self._vicinity = np.array([
-                (
-                    0.0
-                    if lines[lid].vicinity is None
-                    else lines[lid].vicinity
-                )
+            self._norm = ABC[:, 3]
+            self._thresh = np.array([
+                self._line_threshold(lines[lid], frame_size)
                 for lid in self._line_ids
-            ], dtype=np.float32)
-    
-            self._thresh = (
-                self._vicinity * frame_size
-            )
+            ], dtype=dtype)
     
         # ---------------------------------
         # Empty cache
@@ -366,15 +381,12 @@ class GeometryEngine:
     
         else:
     
-            self._A = np.zeros((0,), dtype=np.float32)
-            self._B = np.zeros((0,), dtype=np.float32)
-            self._C = np.zeros((0,), dtype=np.float32)
+            self._A = np.zeros((0,), dtype=dtype)
+            self._B = np.zeros((0,), dtype=dtype)
+            self._C = np.zeros((0,), dtype=dtype)
     
-            self._norm = np.ones((0,), dtype=np.float32)
-    
-            self._vicinity = np.zeros((0,), dtype=np.float32)
-    
-            self._thresh = np.zeros((0,), dtype=np.float32)
+            self._norm = np.ones((0,), dtype=dtype)
+            self._thresh = np.zeros((0,), dtype=dtype)
             
     # =================================================
     # POLYGON MASK
@@ -385,6 +397,11 @@ class GeometryEngine:
         bboxes: np.ndarray,
         points: np.ndarray,
     ):
+        if self.coordinate_space == "world":
+            return points_in_polygon(
+                points,
+                np.asarray(poly.points, dtype=np.float64),
+            ).reshape(-1, 1)
 
         if self._polygon_mode == "center":
 
@@ -419,6 +436,17 @@ class GeometryEngine:
                 f"Unknown polygon mode: {self._polygon_mode}"
             )
 
+    def line_normal(self, line_id: str) -> Optional[np.ndarray]:
+        line_idx = self._line_id_to_idx[line_id]
+        direction = np.asarray(
+            [self._A[line_idx], self._B[line_idx]],
+            dtype=np.float64,
+        )
+        norm = np.linalg.norm(direction)
+        if norm <= 1e-12:
+            return None
+        return direction / norm
+
     # =================================================
     # MAIN COMPUTE
     # =================================================
@@ -436,6 +464,7 @@ class GeometryEngine:
     
         N = points.shape[0]
         L = len(self._line_ids)
+        distance_dtype = np.float64 if self.coordinate_space == "world" else np.float32
     
         # ---------------------------------
         # LINE FEATURES
@@ -456,20 +485,6 @@ class GeometryEngine:
             vicinity_mask = (
                 abs_d < self._thresh[:, None]
             )
-
-            # print(f"x.shape: {x.shape}")
-            # print(f"y.shape: {y.shape}")
-            # print(f"self._A.shape: {self._A.shape}")
-            # print(f"self._B.shape: {self._B.shape}")
-            # print(f"self._C.shape: {self._C.shape}")
-            # print(f"d.shape: {d.shape}")
-            # print(f"self._norm.shape: {self._norm.shape}")
-            # print(f"self._thresh.shape: {self._thresh.shape}")
-            # print(f"sign.shape: {sign.shape}")
-            # print(f"abs_d.shape: {abs_d.shape}")
-            # print(f"vicinity_mask.shape: {vicinity_mask.shape}")
-
-
             
             line_cache = {
                 "distance": abs_d,
@@ -480,7 +495,7 @@ class GeometryEngine:
         else:
     
             line_cache = {
-                "distance": np.zeros((0, N), dtype=np.float32),
+                "distance": np.zeros((0, N), dtype=distance_dtype),
                 "sign": np.zeros((0, N), dtype=np.int8),
                 "vicinity_mask": np.zeros((0, N), dtype=bool),
             }
@@ -508,6 +523,7 @@ class Area(BaseModel):
 
     area_id: str
     name: str
+    area_type: str = "lane"
 
     enable: bool = True
     description: str = ""
@@ -515,9 +531,8 @@ class Area(BaseModel):
     flow_line: Optional[Line] = None
     zone: Optional[Polygon] = None
 
-    metrics_names: List[str] = []
     eligible_metrics: List[str] = []
-    metrics: Dict[str, Any] = Field(
+    ineligible_metrics: Dict[str, str] = Field(
         default_factory=dict
     )
 
@@ -534,3 +549,12 @@ class Area(BaseModel):
             )
 
         return self
+
+    @field_validator("area_type")
+    def valid_area_type(cls, value):
+        supported = {"lane", "direction", "mixed", "entire"}
+        if value not in supported:
+            raise ValueError(
+                f"area_type must be one of: {sorted(supported)}"
+            )
+        return value

@@ -1,6 +1,6 @@
 # detectors/interface.py
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Mapping, Sequence, Tuple, Union
 import numpy as np
 
 
@@ -19,6 +19,10 @@ class IDetector(ABC):
 
     All detectors (Ultralytics, torchvision, TensorRT, custom)
     MUST be able to produce this format.
+
+    Metadata contract:
+        class_names: backend-independent ordered class-name tuple.
+        num_classes: number of classes exposed by the loaded detector model.
     """
 
     # -------------------------
@@ -38,6 +42,22 @@ class IDetector(ABC):
     @abstractmethod
     def close(self) -> None:
         """Release model / GPU / TensorRT resources."""
+        raise NotImplementedError
+
+    # -------------------------
+    # Model metadata
+    # -------------------------
+
+    @property
+    @abstractmethod
+    def class_names(self) -> Tuple[str, ...]:
+        """Ordered class names as exposed by the loaded detector backend."""
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def num_classes(self) -> int:
+        """Number of detector classes, derived from class_names."""
         raise NotImplementedError
 
     # -------------------------
@@ -93,3 +113,24 @@ class IDetector(ABC):
         """
         raise NotImplementedError
 
+
+def normalize_class_names(names: Union[Mapping[int, str], Sequence[str]]) -> Tuple[str, ...]:
+    """
+    Normalize backend metadata into the IDetector class_names representation.
+
+    Backends commonly expose names either as a sequence indexed by class ID
+    or as a class-id keyed mapping. The detector interface uses a tuple so
+    downstream code receives an immutable, backend-independent value.
+    """
+    if isinstance(names, Mapping):
+        ordered = [
+            str(names[class_id])
+            for class_id in sorted(names)
+        ]
+    else:
+        ordered = [str(name) for name in names]
+
+    if not ordered:
+        raise DetectorError("detector metadata must contain at least one class name")
+
+    return tuple(ordered)

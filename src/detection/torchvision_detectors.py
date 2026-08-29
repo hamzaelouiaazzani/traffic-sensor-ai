@@ -5,7 +5,7 @@ import torchvision
 from torchvision import transforms
 from PIL import Image
 
-from detection.interface import IDetector, DetectorError
+from detection.interface import IDetector, DetectorError, normalize_class_names
 import cv2
 
 
@@ -62,8 +62,26 @@ class TorchvisionDetector(IDetector):
 
         self.transform = transforms.ToTensor()
 
-        weights_enum = _TV_WEIGHTS[model_name].DEFAULT
-        self.class_names = weights_enum.meta["categories"]
+        weights_enum = self._resolve_weights_enum(model_name, weights)
+        self._class_names = normalize_class_names(weights_enum.meta["categories"])
+
+    @property
+    def class_names(self):
+        return self._class_names
+
+    @property
+    def num_classes(self):
+        return len(self._class_names)
+
+    @staticmethod
+    def _resolve_weights_enum(model_name: str, weights):
+        if weights == "DEFAULT" or weights is None:
+            return _TV_WEIGHTS[model_name].DEFAULT
+        if hasattr(weights, "meta") and "categories" in weights.meta:
+            return weights
+        raise DetectorError(
+            f"Torchvision weights for {model_name} do not expose category metadata"
+        )
         
 
     # -------------------------
