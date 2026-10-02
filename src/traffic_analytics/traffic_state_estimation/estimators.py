@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from traffic_metrics.models import (
+from traffic_analytics.traffic_state_estimation.models import (
     DensityResult,
     FlowResult,
     OccupancyResult,

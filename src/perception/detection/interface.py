@@ -1,6 +1,6 @@
 # detectors/interface.py
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Mapping, Sequence, Tuple, Union
+from typing import Any, Mapping, Sequence, Tuple, Union
 import numpy as np
 
 
@@ -17,7 +17,7 @@ class IDetector(ABC):
         np.ndarray of shape (N, 6)
         [x1, y1, x2, y2, score, class_id]
 
-    All detectors (Ultralytics, torchvision, TensorRT, custom)
+    All detector adapters (Ultralytics, torchvision, TensorRT, custom)
     MUST be able to produce this format.
 
     Metadata contract:
@@ -29,20 +29,17 @@ class IDetector(ABC):
     # Lifecycle
     # -------------------------
 
-    @abstractmethod
-    def __init__(self, model_name: str, **kwargs: Dict[str, Any]):
+    def __init__(self, model_name: str, **kwargs: Any):
         """Initialize detector resources (model, device, precision, etc.)."""
-        raise NotImplementedError
+        super().__init__()
 
-    @abstractmethod
     def warmup(self, imgsz: Any = None) -> None:
         """Optional warmup to reduce first-inference latency."""
-        raise NotImplementedError
+        return None
 
-    @abstractmethod
     def close(self) -> None:
         """Release model / GPU / TensorRT resources."""
-        raise NotImplementedError
+        return None
 
     # -------------------------
     # Model metadata
@@ -64,23 +61,24 @@ class IDetector(ABC):
     # Pipeline hooks (logical)
     # -------------------------
 
-    @abstractmethod
     def preprocess(self, array_frame: np.ndarray):
         """
-        Prepare input for inference.
-        Return type is framework-specific.
+        Optional adapter hook to prepare input for inference.
+
+        Downstream runtime code does not call this method directly; custom
+        detectors may implement detect_to_track() without exposing framework
+        internals here.
         """
         raise NotImplementedError
 
-    @abstractmethod
     def infer(self, preprocessed_input, **kwargs):
         """
-        Run model forward pass.
-        Return type is framework-specific.
+        Optional adapter hook to run a framework-specific forward pass.
+
+        Downstream runtime code does not call this method directly.
         """
         raise NotImplementedError
 
-    @abstractmethod
     def postprocess(
         self,
         raw_output,
@@ -88,7 +86,7 @@ class IDetector(ABC):
         array_frame: np.ndarray,
     ) -> np.ndarray:
         """
-        Convert raw output to canonical detector format.
+        Optional adapter hook to convert raw output to canonical detector format.
 
         MUST return:
             np.ndarray (N, 6)
@@ -134,3 +132,37 @@ def normalize_class_names(names: Union[Mapping[int, str], Sequence[str]]) -> Tup
         raise DetectorError("detector metadata must contain at least one class name")
 
     return tuple(ordered)
+
+
+def validate_detector_contract(detector: Any) -> IDetector:
+    """
+    Validate the stable detector contract used by downstream runtime code.
+
+    This keeps component replacement focused on the required interface:
+    metadata plus canonical tracker-ready detections. Framework-specific hooks
+    such as preprocess/infer/postprocess remain adapter internals.
+    """
+    missing = []
+    if not callable(getattr(detector, "detect_to_track", None)):
+        missing.append("detect_to_track(frame)")
+    if not hasattr(detector, "class_names"):
+        missing.append("class_names")
+    if not hasattr(detector, "num_classes"):
+        missing.append("num_classes")
+
+    if missing:
+        raise DetectorError(
+            "detector adapter does not satisfy the runtime contract: "
+            + ", ".join(missing)
+        )
+
+    class_names = detector.class_names
+    num_classes = detector.num_classes
+    if not isinstance(class_names, tuple):
+        raise DetectorError("detector.class_names must be an ordered tuple")
+    if not isinstance(num_classes, int) or num_classes <= 0:
+        raise DetectorError("detector.num_classes must be a positive integer")
+    if len(class_names) != num_classes:
+        raise DetectorError("detector.num_classes must match len(detector.class_names)")
+
+    return detector

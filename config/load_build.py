@@ -3,8 +3,16 @@ from typing import Dict, List, Optional, Tuple
 
 import yaml
 
-from geometry.engine import GeometryEngine
-from geometry.primitives import Area, Line, Polygon
+from traffic_analytics.geometry.coordinate_transformation.factory import (
+    coordinate_transformer_config_available,
+)
+from traffic_analytics.geometry.spatial_processing.membership import (
+    ImageRasterMaskPolygonMembership,
+    RayCastingPolygonMembership,
+)
+from traffic_analytics.geometry.spatial_processing.primitives import Line, Polygon
+from traffic_analytics.geometry.spatial_processing.processor import SpatialProcessor
+from traffic_analytics.geometry.topology import Area
 
 
 SUPPORTED_AREA_TYPES = {"lane", "direction", "mixed", "entire"}
@@ -123,15 +131,11 @@ def coordinate_space_requires_world(cfg: dict) -> bool:
 
 def has_world_coordinate_capability(cfg: dict) -> bool:
     policy = str(get_geometry_config(cfg).get("coordinate_space", "image")).lower()
-    homography_cfg = cfg.get("homography", {})
-    homography_enabled = bool(homography_cfg.get("enabled", False))
-    calibration_file = homography_cfg.get("calibration_file")
     _, world_vicinity = get_global_vicinity(cfg)
 
     return (
         policy in {"world", "auto"}
-        and homography_enabled
-        and bool(calibration_file)
+        and coordinate_transformer_config_available(cfg)
         and world_vicinity is not None
     )
 
@@ -269,7 +273,7 @@ def build_areas(
 def build_geometry_engine(
     areas: List[Area],
     cfg: dict,
-) -> GeometryEngine:
+):
     lines = {}
     for area in areas:
         if area.flow_line is not None:
@@ -280,18 +284,31 @@ def build_geometry_engine(
         if area.zone is not None:
             polygons[area.zone.polygon_id] = area.zone
 
-    image_vicinity, _ = get_global_vicinity(cfg)
-    frame_size = get_frame_size_reference(cfg)
-    threshold = 0.0 if image_vicinity is None else float(image_vicinity) * frame_size
-    line_thresholds = {
-        line_id: threshold
-        for line_id in lines
-    }
+    spatial_cfg = get_geometry_config(cfg).get("spatial_processor", {})
+    polygon_list = list(polygons.values())
+    membership_backend = spatial_cfg.get("polygon_membership_backend", "image_raster_mask")
+    dtype = spatial_cfg.get("dtype", "float32")
 
-    return GeometryEngine(
-        lines=lines,
-        polygons=polygons,
-        polygon_mode=get_polygon_membership_mode(cfg),
-        coordinate_space="image",
-        line_vicinity_thresholds=line_thresholds,
+    if membership_backend in {"image_raster_mask", "raster_mask"}:
+        membership = ImageRasterMaskPolygonMembership(
+            polygons=polygon_list,
+            pixel_index_policy=spatial_cfg.get("pixel_index_policy", "floor"),
+            dtype=dtype,
+        )
+    elif membership_backend in {"ray_casting", "ray"}:
+        membership = RayCastingPolygonMembership(
+            polygons=polygon_list,
+            dtype=dtype,
+        )
+    else:
+        raise ValueError(
+            "geometry.spatial_processor.polygon_membership_backend must be "
+            "one of: image_raster_mask, raster_mask, ray_casting, ray"
+        )
+
+    return SpatialProcessor(
+        lines=list(lines.values()),
+        polygons=polygon_list,
+        polygon_membership=membership,
+        dtype=dtype,
     )

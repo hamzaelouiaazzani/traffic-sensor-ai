@@ -5,7 +5,7 @@ import numpy as np
 
 from ultralytics import YOLO , RTDETR
 
-from detection.interface import DetectorError, IDetector, normalize_class_names
+from perception.detection.interface import DetectorError, IDetector, normalize_class_names
 from ultralytics.utils.checks import check_imgsz
 
 

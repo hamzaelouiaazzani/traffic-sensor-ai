@@ -5,7 +5,7 @@ import torchvision
 from torchvision import transforms
 from PIL import Image
 
-from detection.interface import IDetector, DetectorError, normalize_class_names
+from perception.detection.interface import IDetector, DetectorError, normalize_class_names
 import cv2
 
 

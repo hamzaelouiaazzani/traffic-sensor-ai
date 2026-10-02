@@ -10,8 +10,13 @@ from config.load_build import (
     get_input_fps,
     load_config,
 )
-from geometry.homography import Homography, compute_homography, save_calibration_yaml
-from geometry.engine import GeometryEngine
+from traffic_analytics.geometry.coordinate_transformation.homography import (
+    Homography,
+    compute_homography,
+    save_calibration_yaml,
+)
+from traffic_analytics.geometry.spatial_processing.membership import RayCastingPolygonMembership
+from traffic_analytics.geometry.spatial_processing.processor import SpatialProcessor
 from runtime.observations import (
     PeriodObservationBatch,
     PeriodObservationBuffer,
@@ -27,14 +32,10 @@ from runtime.periods import (
     resolve_period_policy,
     resolve_period_seconds,
 )
-from runtime.stage1 import process_stage1_period
+from runtime.perception_runtime import PerceptionRuntime
 from runtime.timing import FrameTiming, TimingPolicy
-from traffic_metrics.engine import PeriodAnalyticsEngine
-from video_io.frame_producer import Frame
-
-
-def _bbox_from_point(x, y):
-    return [x - 1.0, y - 2.0, x + 1.0, y]
+from runtime.analytics import PeriodAnalyticsEngine
+from perception.vision_io.frame_producer import Frame
 
 
 def _batch(rows, period_frames=None, period_timestamps=None, fps=1.0):
@@ -46,14 +47,12 @@ def _batch(rows, period_frames=None, period_timestamps=None, fps=1.0):
         class_id = arr[:, 3].astype(np.int32)
         points = arr[:, 4:6].astype(np.float32)
         is_context = arr[:, 6].astype(bool) if arr.shape[1] > 6 else np.zeros(len(rows), dtype=bool)
-        bboxes = np.asarray([_bbox_from_point(x, y) for x, y in points], dtype=np.float32)
     else:
         timestamp = np.empty((0,), dtype=np.float64)
         frame_id = np.empty((0,), dtype=np.int64)
         track_id = np.empty((0,), dtype=np.int64)
         class_id = np.empty((0,), dtype=np.int32)
         points = np.empty((0, 2), dtype=np.float32)
-        bboxes = np.empty((0, 4), dtype=np.float32)
         is_context = np.empty((0,), dtype=bool)
 
     if period_frames is None:
@@ -73,7 +72,6 @@ def _batch(rows, period_frames=None, period_timestamps=None, fps=1.0):
         track_id=track_id,
         class_id=class_id,
         points=points,
-        bboxes=bboxes,
         is_context=is_context,
         period_frame_ids=np.asarray(period_frames, dtype=np.int64),
         period_timestamps=np.asarray(period_timestamps, dtype=np.float64),
@@ -216,6 +214,38 @@ class _StatefulDummyTracker:
         )
 
 
+def _run_one_perception_frame(
+    producer,
+    detector,
+    tracker,
+    timing_policy,
+    max_observations,
+    period_idx,
+    continuity_policy,
+    boundary_context=None,
+):
+    buffer = PeriodObservationBuffer(max_observations=max_observations)
+    if continuity_policy.enabled:
+        buffer.add_context(boundary_context)
+
+    runtime = PerceptionRuntime(
+        producer=producer,
+        detector=detector,
+        tracker=tracker,
+        timing_policy=timing_policy,
+        buffer=buffer,
+    )
+    step = runtime.process_next_frame()
+    if not step.frame_processed:
+        return None
+
+    return buffer.freeze(
+        period_idx=period_idx,
+        timing_mode=timing_policy.mode,
+        fps=timing_policy.fps,
+    )
+
+
 class PeriodRuntimeTest(unittest.TestCase):
     def test_current_yaml_loads_successfully(self):
         cfg = load_config("config/traffic_metrics.yaml")
@@ -224,7 +254,7 @@ class PeriodRuntimeTest(unittest.TestCase):
         analytics = PeriodAnalyticsEngine(areas, geometry_engine, cfg, num_classes=4)
 
         self.assertEqual(len(areas), 5)
-        self.assertEqual(len(geometry_engine._line_ids), 1)
+        self.assertEqual(len(geometry_engine.line_ids), 1)
         self.assertEqual(analytics.coordinate_space, "image")
 
     def test_input_fps_is_used_by_frame_timing(self):
@@ -305,43 +335,41 @@ class PeriodRuntimeTest(unittest.TestCase):
         areas, geometry_engine, _, _ = _runtime(cfg)
 
         self.assertEqual(len(areas), 2)
-        self.assertEqual(set(geometry_engine._line_ids), {"line_a", "line_b"})
-        np.testing.assert_allclose(geometry_engine._thresh, [5.0, 5.0])
+        self.assertEqual(set(geometry_engine.line_ids), {"line_a", "line_b"})
+        self.assertAlmostEqual(analytics.line_vicinity_threshold, 5.0)
 
     def test_primitives_are_coordinate_system_agnostic(self):
         cfg = _config()
         areas = build_areas(cfg, num_classes=4)
         area = areas[0]
 
-        self.assertEqual(area.flow_line.points, ((0.0, 50.0), (100.0, 50.0)))
-        self.assertEqual(area.zone.points, [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)])
+        np.testing.assert_allclose(area.flow_line.points, ((0.0, 50.0), (100.0, 50.0)))
+        np.testing.assert_allclose(area.zone.points, [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)])
         self.assertEqual(area.distance_meters, 100.0)
         self.assertEqual(set(type(area.flow_line).model_fields), {"line_id", "points"})
         self.assertEqual(set(type(area.zone).model_fields), {"polygon_id", "points"})
 
-    def test_geometry_engine_owns_coordinate_specific_spatial_caches(self):
+    def test_spatial_processor_owns_pure_geometry_operations(self):
         cfg = _config(image_vicinity=0.05, world_vicinity=0.5)
         areas = build_areas(cfg, num_classes=4)
         image_engine = build_geometry_engine(areas, cfg)
-        world_engine = GeometryEngine(
-            lines={area.flow_line.line_id: area.flow_line for area in areas if area.flow_line is not None},
-            polygons={area.zone.polygon_id: area.zone for area in areas if area.zone is not None},
-            polygon_mode="center",
-            coordinate_space="world",
-            line_vicinity_thresholds={"line_a": 0.5},
+        polygons = [area.zone for area in areas if area.zone is not None]
+        world_engine = SpatialProcessor(
+            lines=[area.flow_line for area in areas if area.flow_line is not None],
+            polygons=polygons,
+            polygon_membership=RayCastingPolygonMembership(polygons),
         )
         points = np.asarray([[50.0, 49.8], [50.0, 60.0]], dtype=np.float32)
-        bboxes = np.asarray([_bbox_from_point(x, y) for x, y in points], dtype=np.float32)
 
-        image_line_cache, image_polygon_cache = image_engine.compute(points, bboxes)
-        world_line_cache, world_polygon_cache = world_engine.compute(points, bboxes)
+        image_distances = image_engine.compute_signed_distances(points)
+        world_distances = world_engine.compute_signed_distances(points)
+        image_membership = image_engine.compute_polygon_membership(points)
+        world_membership = world_engine.compute_polygon_membership(points)
 
-        self.assertEqual(set(image_line_cache), {"distance", "sign", "vicinity_mask"})
-        self.assertEqual(set(world_line_cache), {"distance", "sign", "vicinity_mask"})
-        self.assertEqual(image_line_cache["distance"].shape, world_line_cache["distance"].shape)
-        self.assertEqual(image_polygon_cache["area_1"].shape, world_polygon_cache["area_1"].shape)
-        self.assertTrue(bool(image_line_cache["vicinity_mask"][0, 0]))
-        self.assertTrue(bool(world_line_cache["vicinity_mask"][0, 0]))
+        self.assertEqual(image_distances.shape, world_distances.shape)
+        self.assertEqual(image_membership.shape, world_membership.shape)
+        self.assertTrue(bool(np.abs(image_distances[0, 0]) <= 5.0))
+        self.assertTrue(bool(np.abs(world_distances[0, 0]) <= 0.5))
 
     def test_geometry_lines_and_areas_load_from_geometry_section(self):
         cfg = _config()
@@ -447,7 +475,7 @@ class PeriodRuntimeTest(unittest.TestCase):
         self.assertIsNone(continuity.boundary_batch)
         self.assertIsNone(boundary_batch_for_next_period(batch, analytics.continuity_policy))
 
-    def test_stage1_does_not_inject_context_when_continuity_is_disabled(self):
+    def test_perception_runtime_does_not_inject_context_when_continuity_is_disabled(self):
         tracker = _StatefulDummyTracker()
         timing_policy = TimingPolicy(mode="frame", fps=1.0)
         producer = _DummyProducer(
@@ -459,35 +487,33 @@ class PeriodRuntimeTest(unittest.TestCase):
         disabled = ContinuityPolicy(enabled=False, max_age_seconds=30.0)
         carried_context = _batch([(0.0, 0, 7, 0, 1.0, 2.0)])
 
-        first = process_stage1_period(
+        first = _run_one_perception_frame(
             producer=producer,
             detector=_DummyDetector(),
             tracker=tracker,
             timing_policy=timing_policy,
-            period_seconds=1.0,
             max_observations=10,
             period_idx=0,
             continuity_policy=disabled,
             boundary_context=carried_context,
         )
-        second = process_stage1_period(
+        second = _run_one_perception_frame(
             producer=producer,
             detector=_DummyDetector(),
             tracker=tracker,
             timing_policy=timing_policy,
-            period_seconds=1.0,
             max_observations=10,
             period_idx=1,
             continuity_policy=disabled,
-            boundary_context=first.batch,
+            boundary_context=first,
         )
 
         self.assertEqual(tracker.calls, 2)
-        self.assertEqual(first.batch.observation_count, 1)
-        self.assertEqual(second.batch.observation_count, 1)
-        self.assertFalse(np.any(first.batch.is_context))
-        self.assertFalse(np.any(second.batch.is_context))
-        self.assertEqual(int(second.batch.track_id[0]), 102)
+        self.assertEqual(first.observation_count, 1)
+        self.assertEqual(second.observation_count, 1)
+        self.assertFalse(np.any(first.is_context))
+        self.assertFalse(np.any(second.is_context))
+        self.assertEqual(int(second.track_id[0]), 102)
 
     def test_per_area_metric_lists_are_not_expected(self):
         cfg = _config()
@@ -529,7 +555,7 @@ class PeriodRuntimeTest(unittest.TestCase):
         points = np.asarray([[5, 5], [50, 75], [90, 10]], dtype=np.float32)
 
         batched = homography.project_pixels_to_world(points)
-        pointwise = np.vstack([homography.project_pixels_to_world(point)[0] for point in points])
+        pointwise = np.vstack([homography.project_pixels_to_world(point) for point in points])
 
         np.testing.assert_allclose(batched, pointwise, atol=1e-5)
 
@@ -546,12 +572,14 @@ class PeriodRuntimeTest(unittest.TestCase):
         )
 
         spatial = analytics.compute_spatial(batch)
-        expected_line_cache, expected_polygon_cache = geometry_engine.compute(batch.points, batch.bboxes)
+        expected_signed_distances = geometry_engine.compute_signed_distances(batch.points)
+        expected_membership = geometry_engine.compute_polygon_membership(batch.points)
 
-        for key in expected_line_cache:
-            np.testing.assert_array_equal(spatial.line_cache[key], expected_line_cache[key])
-        for key in expected_polygon_cache:
-            np.testing.assert_array_equal(spatial.polygon_cache[key], expected_polygon_cache[key])
+        np.testing.assert_array_equal(spatial.line_cache["distance"], np.abs(expected_signed_distances).T)
+        np.testing.assert_array_equal(spatial.line_cache["sign"], np.sign(expected_signed_distances).T)
+        np.testing.assert_array_equal(spatial.line_cache["vicinity_mask"], np.abs(expected_signed_distances).T <= 2.0)
+        for idx, polygon_id in enumerate(geometry_engine.polygon_ids):
+            np.testing.assert_array_equal(spatial.polygon_cache[polygon_id], expected_membership[:, idx])
 
     def test_period_spatial_world_mode_uses_geometry_engine_contract(self):
         calibration = compute_homography(
@@ -578,22 +606,17 @@ class PeriodRuntimeTest(unittest.TestCase):
             )
 
             spatial = analytics.compute_spatial(batch)
-            expected_points = analytics.transformer.points_to_world(batch.points)
-            expected_bboxes = analytics.transformer.bboxes_to_world(batch.bboxes)
-            expected_line_cache, expected_polygon_cache = analytics.geometry_engine.compute(
-                expected_points,
-                expected_bboxes,
-            )
+            expected_points = analytics.transformer.image_to_world(batch.points)
+            expected_signed_distances = analytics.geometry_engine.compute_signed_distances(expected_points)
+            expected_membership = analytics.geometry_engine.compute_polygon_membership(expected_points)
 
-            self.assertEqual(image_geometry_engine.coordinate_space, "image")
-            self.assertEqual(analytics.geometry_engine.coordinate_space, "world")
             self.assertEqual(spatial.coordinate_space, "world")
             np.testing.assert_allclose(spatial.points, expected_points, atol=1e-6)
-            np.testing.assert_allclose(spatial.bboxes, expected_bboxes, atol=1e-6)
-            for key in expected_line_cache:
-                np.testing.assert_array_equal(spatial.line_cache[key], expected_line_cache[key])
-            for key in expected_polygon_cache:
-                np.testing.assert_array_equal(spatial.polygon_cache[key], expected_polygon_cache[key])
+            np.testing.assert_array_equal(spatial.line_cache["distance"], np.abs(expected_signed_distances).T)
+            np.testing.assert_array_equal(spatial.line_cache["sign"], np.sign(expected_signed_distances).T)
+            np.testing.assert_array_equal(spatial.line_cache["vicinity_mask"], np.abs(expected_signed_distances).T <= 0.2)
+            for idx, polygon_id in enumerate(analytics.geometry_engine.polygon_ids):
+                np.testing.assert_array_equal(spatial.polygon_cache[polygon_id], expected_membership[:, idx])
             self.assertTrue(np.all(spatial.line_cache["vicinity_mask"][0]))
             self.assertTrue(np.all(spatial.polygon_cache["area_1"]))
 
@@ -633,7 +656,6 @@ class PeriodRuntimeTest(unittest.TestCase):
             track_ids=np.asarray([7], dtype=np.int64),
             class_ids=np.asarray([0], dtype=np.int32),
             points=np.asarray([[50.0, 51.0]], dtype=np.float32),
-            bboxes=np.asarray([_bbox_from_point(50.0, 51.0)], dtype=np.float32),
         )
 
         period_2 = buffer.freeze(period_idx=1, timing_mode="frame", fps=1.0)
@@ -666,12 +688,10 @@ class PeriodRuntimeTest(unittest.TestCase):
         self.assertAlmostEqual(result_2.current_time_headway, 2.0)
 
     def test_empty_line_only_and_zone_only_batches_are_valid(self):
-        empty_line_cache, empty_polygon_cache = GeometryEngine(lines={}, polygons={}).compute(
-            points=np.empty((0, 2), dtype=np.float32),
-            bboxes=np.empty((0, 4), dtype=np.float32),
-        )
-        self.assertEqual(empty_line_cache["distance"].shape, (0, 0))
-        self.assertEqual(empty_polygon_cache, {})
+        empty_processor = SpatialProcessor()
+        empty_points = np.empty((0, 2), dtype=np.float32)
+        self.assertEqual(empty_processor.compute_signed_distances(empty_points).shape, (0, 0))
+        self.assertEqual(empty_processor.compute_polygon_membership(empty_points).shape, (0, 0))
 
         line_only_cfg = _config(line=True, zone=False, time_occupancy_enabled=False, time_headway_enabled=False)
         _, _, line_only_analytics, line_only_continuity = _runtime(line_only_cfg)
@@ -712,7 +732,6 @@ class PeriodRuntimeTest(unittest.TestCase):
             track_ids=np.asarray([1], dtype=np.int64),
             class_ids=np.asarray([0], dtype=np.int32),
             points=np.asarray([[50.0, 49.0]], dtype=np.float32),
-            bboxes=np.asarray([_bbox_from_point(50.0, 49.0)], dtype=np.float32),
         )
 
         with self.assertRaises(PeriodObservationBufferOverflow):
@@ -721,7 +740,6 @@ class PeriodRuntimeTest(unittest.TestCase):
                 track_ids=np.asarray([2], dtype=np.int64),
                 class_ids=np.asarray([0], dtype=np.int32),
                 points=np.asarray([[50.0, 51.0]], dtype=np.float32),
-                bboxes=np.asarray([_bbox_from_point(50.0, 51.0)], dtype=np.float32),
             )
 
 

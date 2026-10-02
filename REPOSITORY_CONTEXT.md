@@ -12,6 +12,44 @@ C:\Users\hamza\anaconda3\Scripts\conda.exe run -n smart_sensor <command>
 
 `traffic-sensor-ai` is a Python computer-vision smart traffic sensor. The runtime reads frames from an OpenCV-compatible source, runs object detection, feeds detections into a continuous BoxMOT tracker, applies configured spatial geometry, derives crossing events, computes eligible traffic metrics, and optionally publishes period-level metrics over MQTT.
 
+The package structure mirrors four architectural responsibilities:
+
+```text
+Vision I/O -> Perception -> PeriodObservationBatch -> Analytics
+```
+
+`runtime/` coordinates both perception-period execution and analytics-period execution. `vision_io/`, `perception/`, and `analytics/` contain the domain logic that runtime orchestrates.
+
+## Package Structure
+
+```text
+src/
+├── vision_io/
+│   └── frame_producer.py
+├── perception/
+│   ├── detection/
+│   └── tracking/
+├── analytics/
+│   ├── geometry/
+│   │   ├── primitives.py
+│   │   ├── spatial.py
+│   │   ├── engine.py
+│   │   └── homography.py
+│   └── traffic_metrics/
+│       ├── models.py
+│       └── estimators.py
+├── runtime/
+│   ├── perception.py
+│   ├── analytics.py
+│   ├── timing.py
+│   ├── periods.py
+│   ├── observations.py
+│   ├── continuity.py
+│   └── coordinates.py
+├── communication/
+└── utils/
+```
+
 The primary runtime is a synchronous two-stage pipeline:
 
 ```text
@@ -118,8 +156,7 @@ Stage 1 writes observations into `src/runtime/observations.py::PeriodObservation
 | `frame_id` | `(O,)` | Source frame index. |
 | `track_id` | `(O,)` | Tracker identity. |
 | `class_id` | `(O,)` | Detector/tracker class ID. |
-| `points` | `(O, 2)` | Bottom-center object point. |
-| `bboxes` | `(O, 4)` | Tracked bbox. |
+| `points` | `(O, 2)` | Fixed center point of the tracked bbox. |
 | `is_context` | `(O,)` | Prior-period context row flag. |
 | `period_frame_ids` | `(F,)` | Active source frames in the period. |
 | `period_timestamps` | `(F,)` | Active frame timestamps in the period. |
@@ -128,12 +165,12 @@ Stage 1 writes observations into `src/runtime/observations.py::PeriodObservation
 
 `PeriodObservationBuffer` is bounded and raises `PeriodObservationBufferOverflow`; it must not silently discard observations.
 
-Stage 1 reusable period execution lives in `src/runtime/stage1.py`. Full runtime orchestration and the standalone exporter both use this same loop for acquisition, timing, detection, tracking, canonical observation extraction, and buffer freezing.
+Perception-period execution lives in `src/runtime/perception.py`. Full runtime orchestration and the standalone exporter both use this same loop for acquisition, timing, detection, tracking, canonical observation extraction, and buffer freezing.
 
-Standalone Stage 1 export utility:
+Standalone perception export utility:
 
 ```powershell
-C:\Users\hamza\anaconda3\Scripts\conda.exe run -n smart_sensor python scripts\run_stage1.py --source video.mp4 --config config\traffic_metrics.yaml --output outputs\stage1 --max-periods 1
+C:\Users\hamza\anaconda3\Scripts\conda.exe run -n smart_sensor python scripts\run_perception.py --source video.mp4 --config config\traffic_metrics.yaml --output outputs\perception --max-periods 1
 ```
 
 It exports one `.npz` per period with the batch columns above.
@@ -163,9 +200,16 @@ Supported `area_type` values:
 - `mixed`
 - `entire`
 
-`src/geometry/primitives.py::Area` validates `area_type`.
+`src/traffic_analytics/geometry/topology.py::Area` validates `area_type`.
 
-Homography is centralized in `src/runtime/coordinates.py`. Static lines and polygons are transformed once during `PeriodAnalyticsEngine` initialization when world-space coordinates are selected. Dynamic batch `points` and `bboxes` are transformed vectorially once in Stage 2. Individual metrics must not call homography.
+Planar coordinate transformation is encapsulated behind `IPlanarCoordinateTransformer`
+in `src/traffic_analytics/geometry/coordinate_transformation`. Static lines and
+polygons are transformed once during `PeriodAnalyticsEngine` initialization when
+world-space coordinates are selected. Dynamic batch `points` are transformed
+vectorially once in Stage 2. Tracked image-space bboxes are used transiently in
+Stage 1 only to derive the fixed center point; they are not stored in
+`PeriodObservationBuffer` or transformed in Stage 2. Individual metrics must not
+call homography.
 
 The geometry subsystem owns all spatial reasoning in both image and world modes:
 
@@ -175,9 +219,20 @@ The geometry subsystem owns all spatial reasoning in both image and world modes:
 - polygon membership,
 - spatial cache shape and semantics.
 
-`src/geometry/engine.py::GeometryEngine` exposes the single Stage 2 spatial-computation contract. `src/geometry/primitives.py` defines only coordinate-agnostic primitives: `Line`, `Polygon`, and `Area`. Image-space engines use raster polygon masks and pixel-scaled vicinity thresholds. World-space engines use the same primitive types after centralized coordinate transformation, metric thresholds, and vectorized point-in-polygon logic from `src/geometry/spatial.py`. Both paths return the same `(line_cache, polygon_cache)` structure.
+`src/traffic_analytics/geometry/spatial_processing/engine.py::GeometryEngine` exposes
+the single Stage 2 spatial-computation contract.
+`src/traffic_analytics/geometry/spatial_processing/primitives.py` defines only
+coordinate-agnostic primitives: `Point`, `Line`, and `Polygon`. Image-space engines
+use raster polygon masks and pixel-scaled vicinity thresholds. World-space engines
+use the same primitive types after centralized coordinate transformation, metric
+thresholds, and vectorized point-in-polygon logic from
+`src/traffic_analytics/geometry/spatial_processing/spatial.py`. Both paths return
+the same `(line_cache, polygon_cache)` structure.
 
-`src/traffic_metrics/engine.py::PeriodAnalyticsEngine` selects the coordinate space, invokes `CoordinateTransformer` when needed, delegates all spatial cache computation to `GeometryEngine`, then derives events and dispatches metric estimators.
+`src/runtime/analytics.py::PeriodAnalyticsEngine` selects the coordinate space,
+invokes an `IPlanarCoordinateTransformer` when needed, delegates all spatial cache
+computation to `GeometryEngine`, then derives events and dispatches metric
+estimators.
 
 Coordinate policy:
 
@@ -223,7 +278,9 @@ Current status under the redesigned config:
 | `time_headway` | Implemented | Lane-only, image or world. Preserves cross-period last crossing timestamp. |
 | `speed` | Architecture-only / not implemented | No validated speed metric backend was found; config support is extensible but computation is skipped. |
 
-Metric result dataclasses live in `src/traffic_metrics/models.py`. Metric algorithms live in `src/traffic_metrics/estimators.py`. `src/traffic_metrics/engine.py` coordinates Stage 2 and dispatches eligible metrics by name.
+Metric result dataclasses live in `src/traffic_analytics/traffic_state_estimation/models.py`.
+Metric algorithms live in `src/traffic_analytics/traffic_state_estimation/estimators.py`.
+`src/runtime/analytics.py` coordinates Stage 2 and dispatches eligible metrics by name.
 
 ## Detector Metadata
 
@@ -271,23 +328,29 @@ Do not add separate crossing/counter TTLs.
 | `config/load_build.py` | Current-schema YAML assembly, metric eligibility, area/geometry construction. |
 | `scripts/sensor_pipeline.py` | Runtime orchestration around reusable Stage 1 and synchronous Stage 2 call. |
 | `scripts/run_sensor.py` | Direct CLI entry point. |
-| `scripts/run_stage1.py` | Stage 1-only `.npz` batch exporter. |
+| `scripts/run_perception.py` | Perception-runtime `.npz` batch exporter. |
+| `scripts/developer_tutorial.ipynb` | End-to-end developer tutorial from setup through perception and analytics APIs. |
 | `scripts/sensor_daemon.py` | MQTT-controlled daemon entry point. |
 | `src/runtime/periods.py` | Reporting-period validation and derived buffer-capacity policy. |
 | `src/runtime/continuity.py` | Boundary context policy and cross-period analytics state container. |
-| `src/runtime/stage1.py` | Reusable Stage 1 period loop and canonical tracker-output extraction. |
+| `src/runtime/perception.py` | Reusable perception-period loop and canonical tracker-output extraction. |
 | `src/runtime/timing.py` | Centralized timing policy. |
 | `src/runtime/observations.py` | Bounded period buffer and batch representation. |
-| `src/runtime/coordinates.py` | Centralized optional homography. |
-| `src/traffic_metrics/engine.py` | Stage 2 vectorized analytics orchestration. |
-| `src/traffic_metrics/models.py` | Traffic analytics/result contracts. |
-| `src/traffic_metrics/estimators.py` | Current vectorized traffic metric algorithms. |
-| `src/geometry/primitives.py` | Coordinate-agnostic Line, Polygon, and typed Area primitives. |
-| `src/geometry/spatial.py` | Shared spatial algorithms plus image-space and world-space implementations used by GeometryEngine. |
-| `src/geometry/engine.py` | Single spatial cache contract for image-space and world-space geometry. |
-| `src/detection/*` | Detector adapters and metadata contract. |
-| `src/tracking/track.py` | BoxMOT tracker wrapper. |
-| `src/video_io/frame_producer.py` | Direct, sampled offline, and real-time simulation producers. |
+| `src/runtime/analytics.py` | Stage 2 analytics orchestration and event derivation. |
+| `src/traffic_analytics/traffic_state_estimation/models.py` | Traffic analytics/result contracts. |
+| `src/traffic_analytics/traffic_state_estimation/estimators.py` | Current vectorized traffic metric algorithms. |
+| `src/traffic_analytics/geometry/coordinate_transformation/interface.py` | Stable planar point-transform contract. |
+| `src/traffic_analytics/geometry/coordinate_transformation/factory.py` | Coordinate-transformer backend binding. |
+| `src/traffic_analytics/geometry/coordinate_transformation/homography.py` | Homography-backed transformer implementation. |
+| `src/traffic_analytics/geometry/topology.py` | Semantic Area topology composed from pure geometric primitives. |
+| `src/traffic_analytics/geometry/spatial_processing/primitives.py` | Pure coordinate-agnostic Point, Line, and Polygon primitives. |
+| `src/traffic_analytics/geometry/spatial_processing/membership.py` | Replaceable polygon-membership algorithms: coordinate-agnostic ray casting and image-only raster mask. |
+| `src/traffic_analytics/geometry/spatial_processing/processor.py` | Stateless pure geometry processor that delegates polygon membership to an injected strategy and computes line signed distance. |
+| `src/traffic_analytics/geometry/spatial_processing/spatial.py` | Shared spatial algorithms plus image-space and world-space implementations used by GeometryEngine. |
+| `src/traffic_analytics/geometry/spatial_processing/engine.py` | Single spatial cache contract for image-space and world-space geometry. |
+| `src/perception/detection/*` | Detector adapters and metadata contract. |
+| `src/perception/tracking/track.py` | BoxMOT tracker wrapper. |
+| `src/vision_io/frame_producer.py` | Direct, sampled offline, and real-time simulation producers. |
 | `visualization/draw_geometry.py` | Draws current-schema `geometry.lines` and area zones. |
 | `tests/test_period_runtime.py` | Current-schema deterministic runtime tests. |
 
@@ -315,7 +378,7 @@ OK
 Current config smoke check:
 
 ```powershell
-C:\Users\hamza\anaconda3\Scripts\conda.exe run -n smart_sensor python -c "from config.load_build import load_config, build_areas, build_geometry_engine; from traffic_metrics.engine import PeriodAnalyticsEngine; cfg=load_config('config/traffic_metrics.yaml'); areas=build_areas(cfg, num_classes=4); engine=build_geometry_engine(areas,cfg); analytics=PeriodAnalyticsEngine(areas,engine,cfg,num_classes=4); print(len(areas), len(engine._line_ids), analytics.coordinate_space, {a.area_id: sorted(a.eligible_metrics) for a in areas})"
+C:\Users\hamza\anaconda3\Scripts\conda.exe run -n smart_sensor python -c "from config.load_build import load_config, build_areas, build_geometry_engine; from runtime.analytics import PeriodAnalyticsEngine; cfg=load_config('config/traffic_metrics.yaml'); areas=build_areas(cfg, num_classes=4); engine=build_geometry_engine(areas,cfg); analytics=PeriodAnalyticsEngine(areas,engine,cfg,num_classes=4); print(len(areas), len(engine.line_ids), analytics.coordinate_space, {a.area_id: sorted(a.eligible_metrics) for a in areas})"
 ```
 
 Latest result:

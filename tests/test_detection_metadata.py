@@ -2,7 +2,9 @@ import unittest
 
 import numpy as np
 
-from detection.interface import IDetector, normalize_class_names
+from perception.detection.factory import build_detector
+from perception.detection.interface import IDetector, normalize_class_names
+from perception.tracking.factory import build_tracker
 
 
 class DummyDetector(IDetector):
@@ -55,6 +57,35 @@ class DetectorMetadataContractTest(unittest.TestCase):
         self.assertEqual(detector.class_names, ("car", "truck"))
         self.assertEqual(detector.num_classes, 2)
         self.assertEqual(detector.detect_to_track(np.zeros((4, 4, 3))).shape, (0, 6))
+
+    def test_custom_detector_can_be_bound_by_class_path(self):
+        detector = build_detector(
+            model_name="dummy",
+            backend="custom",
+            class_path=f"{__name__}:DummyDetector",
+            names=["car"],
+        )
+
+        self.assertEqual(detector.class_names, ("car",))
+        self.assertEqual(detector.detect_to_track(np.zeros((4, 4, 3))).shape, (0, 6))
+
+    def test_custom_tracker_can_be_bound_by_class_path(self):
+        tracker = build_tracker(
+            backend="custom",
+            class_path=f"{__name__}:DummyTracker",
+        )
+
+        tracks = tracker.update(
+            np.zeros((0, 6), dtype=np.float32),
+            np.zeros((4, 4, 3), dtype=np.uint8),
+        )
+
+        self.assertEqual(tracks.shape, (0, 7))
+
+
+class DummyTracker:
+    def update(self, detections, frame):
+        return np.zeros((0, 7), dtype=np.float32)
 
 
 if __name__ == "__main__":

@@ -14,14 +14,19 @@ class PeriodObservationBufferOverflow(BufferError):
 
 @dataclass(frozen=True)
 class PeriodObservationBatch:
-    """Column-oriented observation batch passed from perception to analytics."""
+    """
+    Column-oriented observation batch passed from perception to analytics.
+
+    points contains the fixed center point of each tracked image-space bbox:
+        x = (x1 + x2) / 2
+        y = (y1 + y2) / 2
+    """
 
     timestamp: np.ndarray
     frame_id: np.ndarray
     track_id: np.ndarray
     class_id: np.ndarray
     points: np.ndarray
-    bboxes: np.ndarray
     is_context: np.ndarray
     period_frame_ids: np.ndarray
     period_timestamps: np.ndarray
@@ -133,7 +138,6 @@ class PeriodObservationBatch:
             track_id=self.track_id[idx].copy(),
             class_id=self.class_id[idx].copy(),
             points=self.points[idx].copy(),
-            bboxes=self.bboxes[idx].copy(),
             is_context=is_context,
             period_frame_ids=np.empty((0,), dtype=np.int64),
             period_timestamps=np.empty((0,), dtype=np.float64),
@@ -144,7 +148,7 @@ class PeriodObservationBatch:
 
 
 class PeriodObservationBuffer:
-    """Bounded preallocated storage for one reporting period."""
+    """Bounded preallocated storage for canonical bbox-center observations."""
 
     def __init__(self, max_observations: int):
         max_observations = int(max_observations)
@@ -157,7 +161,6 @@ class PeriodObservationBuffer:
         self.track_id = np.empty((max_observations,), dtype=np.int64)
         self.class_id = np.empty((max_observations,), dtype=np.int32)
         self.points = np.empty((max_observations, 2), dtype=np.float32)
-        self.bboxes = np.empty((max_observations, 4), dtype=np.float32)
         self.is_context = np.empty((max_observations,), dtype=bool)
         self._size = 0
         self._period_frame_ids = []
@@ -186,7 +189,6 @@ class PeriodObservationBuffer:
             track_id=batch.track_id,
             class_id=batch.class_id,
             points=batch.points,
-            bboxes=batch.bboxes,
             is_context=True,
         )
 
@@ -196,7 +198,6 @@ class PeriodObservationBuffer:
         track_ids: np.ndarray,
         class_ids: np.ndarray,
         points: np.ndarray,
-        bboxes: np.ndarray,
     ) -> None:
         self._period_frame_ids.append(timing.frame_id)
         self._period_timestamps.append(timing.timestamp)
@@ -211,7 +212,6 @@ class PeriodObservationBuffer:
             track_id=track_ids.astype(np.int64, copy=False),
             class_id=class_ids.astype(np.int32, copy=False),
             points=points.astype(np.float32, copy=False),
-            bboxes=bboxes.astype(np.float32, copy=False),
             is_context=False,
         )
 
@@ -228,7 +228,6 @@ class PeriodObservationBuffer:
             track_id=self.track_id[:size].copy(),
             class_id=self.class_id[:size].copy(),
             points=self.points[:size].copy(),
-            bboxes=self.bboxes[:size].copy(),
             is_context=self.is_context[:size].copy(),
             period_frame_ids=np.asarray(self._period_frame_ids, dtype=np.int64),
             period_timestamps=np.asarray(self._period_timestamps, dtype=np.float64),
@@ -244,7 +243,6 @@ class PeriodObservationBuffer:
         track_id: np.ndarray,
         class_id: np.ndarray,
         points: np.ndarray,
-        bboxes: np.ndarray,
         is_context: bool,
     ) -> None:
         n = int(track_id.shape[0])
@@ -260,6 +258,5 @@ class PeriodObservationBuffer:
         self.track_id[self._size:end] = track_id
         self.class_id[self._size:end] = class_id
         self.points[self._size:end] = points
-        self.bboxes[self._size:end] = bboxes
         self.is_context[self._size:end] = is_context
         self._size = end

@@ -15,7 +15,7 @@ from communication.services import (
 )
 from communication.topics import SensorTopics
 from sensor_pipeline import run_sensor
-from video_io.frame_producer import DirectFrameProducer
+from perception.vision_io.frame_producer import DirectFrameProducer
 
 
 class SensorState(str, Enum):

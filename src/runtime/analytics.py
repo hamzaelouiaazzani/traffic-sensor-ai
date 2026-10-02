@@ -4,16 +4,21 @@ from typing import Dict
 
 import numpy as np
 
-from geometry.engine import GeometryEngine
-from geometry.primitives import Line, Polygon
-from runtime.coordinates import CoordinateTransformer
+from traffic_analytics.geometry.coordinate_transformation.factory import (
+    build_coordinate_transformer_from_config,
+)
+from traffic_analytics.geometry.spatial_processing.membership import (
+    RayCastingPolygonMembership,
+)
+from traffic_analytics.geometry.spatial_processing.primitives import Line, Polygon
+from traffic_analytics.geometry.spatial_processing.processor import SpatialProcessor
 from runtime.continuity import (
     AnalyticsContinuityContext,
     boundary_batch_for_next_period,
     resolve_continuity_policy,
 )
 from runtime.observations import PeriodObservationBatch
-from traffic_metrics.estimators import (
+from traffic_analytics.traffic_state_estimation.estimators import (
     estimate_density,
     estimate_flow,
     estimate_space_headway,
@@ -21,7 +26,7 @@ from traffic_metrics.estimators import (
     estimate_time_occupancy,
     normalize_counter_logic,
 )
-from traffic_metrics.models import (
+from traffic_analytics.traffic_state_estimation.models import (
     PeriodEvents,
     PeriodSpatialResult,
 )
@@ -53,14 +58,17 @@ class PeriodAnalyticsEngine:
         self.continuity_max_age_seconds = self.continuity_policy.max_age_seconds
 
         self.coordinate_policy = cfg.get("geometry", {}).get("coordinate_space", "image")
-        self.transformer = CoordinateTransformer.from_config(cfg)
+        self.transformer = build_coordinate_transformer_from_config(cfg)
         self.world_line_vicinity_threshold = _world_line_vicinity_threshold(cfg)
         self.coordinate_space = self._resolve_coordinate_space()
         if self.coordinate_space == "world":
             self.geometry_engine = self._build_world_geometry_engine(geometry_engine)
+            self.line_vicinity_threshold = self.world_line_vicinity_threshold
+        else:
+            self.line_vicinity_threshold = _image_line_vicinity_threshold(cfg)
 
-        self._line_ids = list(self.geometry_engine._line_ids)
-        self._line_id_to_idx = dict(self.geometry_engine._line_id_to_idx)
+        self._line_ids = self.geometry_engine.line_ids
+        self._line_id_to_idx = self.geometry_engine.line_id_to_index
 
     def compute_period(
         self,
@@ -78,18 +86,19 @@ class PeriodAnalyticsEngine:
 
     def compute_spatial(self, batch: PeriodObservationBatch) -> PeriodSpatialResult:
         if self.coordinate_space == "world":
-            points = self.transformer.points_to_world(batch.points)
-            bboxes = self.transformer.bboxes_to_world(batch.bboxes)
+            points = self.transformer.image_to_world(batch.points)
         else:
             points = batch.points
-            bboxes = batch.bboxes
 
-        line_cache, polygon_cache = self.geometry_engine.compute(points, bboxes)
+        line_cache, polygon_cache = _compute_spatial_cache(
+            processor=self.geometry_engine,
+            points=points,
+            line_vicinity_threshold=self.line_vicinity_threshold,
+        )
 
         return PeriodSpatialResult(
             coordinate_space=self.coordinate_space,
             points=points,
-            bboxes=bboxes,
             line_cache=line_cache,
             polygon_cache=polygon_cache,
             line_ids=self._line_ids,
@@ -341,7 +350,9 @@ class PeriodAnalyticsEngine:
             return "image"
         if policy == "world":
             if self.transformer is None:
-                raise ValueError("geometry.coordinate_space='world' requires homography.enabled=true")
+                raise ValueError(
+                    "geometry.coordinate_space='world' requires a configured coordinate transformer"
+                )
             return "world"
         if policy == "auto":
             if self.transformer is not None and self._all_world_vicinity_available():
@@ -355,44 +366,80 @@ class PeriodAnalyticsEngine:
                 return False
         return True
 
-    def _build_world_geometry_engine(self, image_geometry_engine) -> GeometryEngine:
+    def _build_world_geometry_engine(self, image_geometry_engine: SpatialProcessor) -> SpatialProcessor:
         if not self._all_world_vicinity_available():
             raise ValueError(
                 "world-space geometry requires every active flow line to define vicinity.world_m"
             )
 
         lines = {}
-        for line_id in image_geometry_engine._line_ids:
-            line = image_geometry_engine._lines[line_id]
-            lines[line_id] = Line(
-                line_id=line.line_id,
-                points=_as_point_tuples(self.transformer.line_to_world(line.points)),
-            )
-
         polygons = {}
-        for polygon_id, polygon in image_geometry_engine._polygons.items():
-            polygons[polygon_id] = Polygon(
-                polygon_id=polygon_id,
-                points=_as_point_tuples(self.transformer.polygon_to_world(polygon.points)),
-            )
+        for area in self.areas:
+            if area.flow_line is not None:
+                line = area.flow_line
+                lines[line.line_id] = Line(
+                    line_id=line.line_id,
+                    points=_as_point_tuples(self.transformer.image_to_world(line.points)),
+                )
 
-        threshold = 0.0 if self.world_line_vicinity_threshold is None else float(self.world_line_vicinity_threshold)
-        line_thresholds = {
-            line_id: threshold
-            for line_id in lines
-        }
+            if area.zone is not None:
+                polygon = area.zone
+                polygons[polygon.polygon_id] = Polygon(
+                    polygon_id=polygon.polygon_id,
+                    points=_as_point_tuples(self.transformer.image_to_world(polygon.points)),
+                )
 
-        return GeometryEngine(
-            lines=lines,
-            polygons=polygons,
-            polygon_mode=image_geometry_engine._polygon_mode,
-            coordinate_space="world",
-            line_vicinity_thresholds=line_thresholds,
+        polygon_list = list(polygons.values())
+        membership = RayCastingPolygonMembership(
+            polygons=polygon_list,
+            dtype=np.float32,
         )
+        return SpatialProcessor(
+            lines=list(lines.values()),
+            polygons=polygon_list,
+            polygon_membership=membership,
+            dtype=np.float32,
+        )
+
+
+def _compute_spatial_cache(
+    *,
+    processor: SpatialProcessor,
+    points: np.ndarray,
+    line_vicinity_threshold: float | None,
+) -> tuple[Dict[str, np.ndarray], Dict[str, np.ndarray]]:
+    signed_distances = processor.compute_signed_distances(points)
+    distances = np.abs(signed_distances).T
+    signs = np.sign(signed_distances).T
+    threshold = 0.0 if line_vicinity_threshold is None else float(line_vicinity_threshold)
+    vicinity_mask = distances <= threshold
+
+    membership = processor.compute_polygon_membership(points)
+    polygon_cache = {
+        polygon_id: membership[:, idx]
+        for idx, polygon_id in enumerate(processor.polygon_ids)
+    }
+
+    return (
+        {
+            "distance": distances,
+            "sign": signs,
+            "vicinity_mask": vicinity_mask,
+        },
+        polygon_cache,
+    )
 
 
 def _metric_config(cfg: dict, metric_name: str) -> dict:
     return cfg.get("metrics", {}).get(metric_name, {})
+
+
+def _image_line_vicinity_threshold(cfg: dict) -> float | None:
+    value = cfg.get("geometry", {}).get("vicinity", {}).get("image")
+    if value is None:
+        return None
+    frame_size = float(cfg.get("geometry", {}).get("frame_size_reference", 1.0))
+    return float(value) * frame_size
 
 
 def _world_line_vicinity_threshold(cfg: dict) -> float | None:

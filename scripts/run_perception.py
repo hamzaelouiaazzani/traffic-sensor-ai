@@ -13,28 +13,21 @@ for path in (ROOT, ROOT / "src", ROOT / "scripts"):
 
 from config.load_build import load_config
 from runtime.continuity import boundary_batch_for_next_period, resolve_continuity_policy
+from runtime.observations import PeriodObservationBuffer
 from runtime.periods import resolve_period_policy
-from runtime.stage1 import process_stage1_period
+from runtime.perception_runtime import PerceptionRuntime
 from runtime.timing import TimingPolicy
 
 
 def build_tracker(cfg: dict):
-    from tracking.track import Tracker
+    from perception.tracking.factory import build_tracker_from_config
 
-    tracker_cfg = cfg["tracker"]
-    return Tracker(
-        method=tracker_cfg["method"],
-        reid_model=tracker_cfg["reid_model"],
-        classes=tracker_cfg["classes"],
-        device=tracker_cfg["device"],
-        half=tracker_cfg["half"],
-        per_class=tracker_cfg["per_class"],
-    )
+    return build_tracker_from_config(cfg["tracker"])
 
 
-def save_stage1_batch(batch, output_dir: Path) -> Path:
+def save_perception_batch(batch, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"period_{batch.period_idx:06d}_stage1.npz"
+    output_path = output_dir / f"period_{batch.period_idx:06d}_perception.npz"
     np.savez_compressed(
         output_path,
         timestamp=batch.timestamp,
@@ -42,7 +35,6 @@ def save_stage1_batch(batch, output_dir: Path) -> Path:
         track_id=batch.track_id,
         class_id=batch.class_id,
         points=batch.points,
-        bboxes=batch.bboxes,
         is_context=batch.is_context,
         period_frame_ids=batch.period_frame_ids,
         period_timestamps=batch.period_timestamps,
@@ -53,7 +45,7 @@ def save_stage1_batch(batch, output_dir: Path) -> Path:
     return output_path
 
 
-def run_stage1(
+def run_perception(
     config_path: str,
     output_dir: str,
     source: Optional[str] = None,
@@ -63,7 +55,7 @@ def run_stage1(
 ) -> List[Path]:
     cfg = load_config(config_path)
 
-    from detection.factory import build_detector
+    from perception.detection.factory import build_detector_from_config
     from scripts.sensor_pipeline import (
         build_frame_producer,
         resolve_capacity_fps,
@@ -82,10 +74,7 @@ def run_stage1(
     )
     continuity_policy = resolve_continuity_policy(cfg)
 
-    detector = build_detector(
-        model_name=cfg["detector"]["model_name"],
-        conf=cfg["detector"]["confidence"],
-    )
+    detector = build_detector_from_config(cfg["detector"])
 
     _ = resolve_detector_device(detector)
 
@@ -101,23 +90,46 @@ def run_stage1(
     producer.start()
     try:
         while max_periods is None or period_idx < max_periods:
-            result = process_stage1_period(
+            buffer = PeriodObservationBuffer(period_policy.max_observations)
+            if continuity_policy.enabled:
+                buffer.add_context(boundary_context)
+
+            perception_runtime = PerceptionRuntime(
                 producer=producer,
                 detector=detector,
                 tracker=tracker,
                 timing_policy=timing_policy,
-                period_seconds=period_policy.period_seconds,
-                max_observations=period_policy.max_observations,
-                period_idx=period_idx,
-                continuity_policy=continuity_policy,
-                boundary_context=boundary_context,
+                buffer=buffer,
             )
-            batch = result.batch
 
-            if batch is None:
+            first_timing = None
+            frames_processed = 0
+            end_of_stream = False
+            while True:
+                step = perception_runtime.process_next_frame()
+                if step.end_of_stream:
+                    end_of_stream = True
+                    break
+                if not step.frame_processed:
+                    break
+
+                frames_processed += 1
+                if first_timing is None:
+                    first_timing = step.timing
+
+                if timing_policy.period_elapsed_seconds(first_timing, step.timing) >= period_policy.period_seconds:
+                    break
+
+            if frames_processed == 0:
                 break
 
-            output_path = save_stage1_batch(batch, Path(output_dir))
+            batch = buffer.freeze(
+                period_idx=period_idx,
+                timing_mode=timing_policy.mode,
+                fps=timing_policy.fps,
+            )
+
+            output_path = save_perception_batch(batch, Path(output_dir))
             output_paths.append(output_path)
 
             print(
@@ -134,11 +146,13 @@ def run_stage1(
 
             period_idx += 1
 
-            if result.end_of_stream:
+            if end_of_stream:
                 break
 
     finally:
         producer.release()
+        if hasattr(tracker, "close"):
+            tracker.close()
         if hasattr(detector, "close"):
             detector.close()
 
@@ -147,10 +161,10 @@ def run_stage1(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Run Stage 1 only and export PeriodObservationBatch files."
+        description="Run perception runtime only and export PeriodObservationBatch files."
     )
     parser.add_argument("--config", default="config/traffic_metrics.yaml", help="YAML runtime config path.")
-    parser.add_argument("--output", default="outputs/stage1", help="Directory for per-period .npz exports.")
+    parser.add_argument("--output", default="outputs/perception", help="Directory for per-period .npz exports.")
     parser.add_argument("--source", default=None, help="Override input.source from config.")
     parser.add_argument("--fps", type=float, default=None, help="Override config FPS.")
     parser.add_argument("--period-mins", type=float, default=None, help="Override analytics period length in minutes.")
@@ -160,7 +174,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    run_stage1(
+    run_perception(
         config_path=args.config,
         output_dir=args.output,
         source=args.source,

@@ -48,7 +48,6 @@ class OccupancyResult:
 class PeriodSpatialResult:
     coordinate_space: str
     points: np.ndarray
-    bboxes: np.ndarray
     line_cache: Dict[str, np.ndarray]
     polygon_cache: Dict[str, np.ndarray]
     line_ids: List[str]

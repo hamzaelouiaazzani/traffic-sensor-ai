@@ -1,13 +1,17 @@
-# geometry/homography.py
+# geometry/coordinate_transformation/homography.py
 from __future__ import annotations
-import time
 import json
-from dataclasses import dataclass, asdict
+import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence, Tuple, Optional, Dict, Any
+from typing import Any, Dict, Sequence, Tuple
 
 import numpy as np
 import cv2
+
+from traffic_analytics.geometry.coordinate_transformation.interface import (
+    IPlanarCoordinateTransformer,
+)
 
 try:
     import yaml
@@ -205,24 +209,19 @@ class Homography:
 
     def project_pixels_to_world(self, pixels: Sequence[Pixel]) -> np.ndarray:
         """
-        Image-space pixels -> Nx2 world-space coordinates in meters.
-        Returns Nx2 float64 array.
+        Image-space pixels -> world-space coordinates in meters.
+
+        Accepts arrays whose final dimension is 2 and preserves the input shape.
         """
-        arr = np.asarray(pixels, dtype=np.float32)
-        if arr.ndim == 1:
-            arr = arr.reshape(1, 2)
-        out = cv2.perspectiveTransform(arr.reshape(-1, 1, 2), self._H).reshape(-1, 2)
-        return out.astype(np.float64)
+        return _project_points(pixels, self._H)
 
     def project_world_to_pixels(self, world_points: Sequence[World]) -> np.ndarray:
         """
-        World-space meters -> Nx2 image-space pixels.
+        World-space meters -> image-space pixels.
+
+        Accepts arrays whose final dimension is 2 and preserves the input shape.
         """
-        arr = np.asarray(world_points, dtype=np.float32)
-        if arr.ndim == 1:
-            arr = arr.reshape(1, 2)
-        out = cv2.perspectiveTransform(arr.reshape(-1, 1, 2), self._H_inv).reshape(-1, 2)
-        return out.astype(np.float64)
+        return _project_points(world_points, self._H_inv)
 
     def reprojection_rmse(self, image_points: Sequence[Pixel], world_points: Sequence[World]) -> float:
         img = _ensure_numpy_pts(image_points)
@@ -278,48 +277,34 @@ class Homography:
         bird = cv2.warpPerspective(frame, M, (dst_w, dst_h), flags=cv2.INTER_LINEAR, borderValue=border_value)
         return bird
 
+class HomographyTransformer(IPlanarCoordinateTransformer):
+    """Homography-backed adapter for the planar coordinate-transform contract."""
 
+    def __init__(self, calibration_file: str | Path):
+        self.calibration_file = str(calibration_file)
+        self._homography = Homography(load_calibration(Path(calibration_file)))
 
-    def project_bboxes_to_world(self, bboxes: np.ndarray) -> np.ndarray:
-        """
-        Convert Nx4 bounding boxes from image-space pixels to world-space coordinates.
-    
-        Args:
-            bboxes: Nx4 array-like, each row = (x1, y1, x2, y2) in image-space pixels
-    
-        Returns:
-            Nx4 ndarray of world-space coordinates, same order: (X1, Y1, X2, Y2)
-        """
-        bboxes = np.asarray(bboxes, dtype=np.float32)
-        if bboxes.ndim != 2 or bboxes.shape[1] != 4:
-            raise ValueError("bboxes must have shape Nx4 (x1, y1, x2, y2)")
-    
-        # extract top-left and bottom-right corners
-        tl = bboxes[:, :2]  # (x1, y1)
-        br = bboxes[:, 2:]  # (x2, y2)
-    
-        # project all corners at once
-        tl_world = cv2.perspectiveTransform(tl.reshape(-1, 1, 2), self._H).reshape(-1, 2)
-        br_world = cv2.perspectiveTransform(br.reshape(-1, 1, 2), self._H).reshape(-1, 2)
-    
-        # concatenate back to Nx4
-        return np.hstack([tl_world, br_world])
+    def image_to_world(self, points: np.ndarray) -> np.ndarray:
+        return self._homography.project_pixels_to_world(points)
+
+    def world_to_image(self, points: np.ndarray) -> np.ndarray:
+        return self._homography.project_world_to_pixels(points)
 
 
 
-    def project_polygon_to_world(self, polygon: np.ndarray) -> np.ndarray:
-        """
-        Convert polygon vertices from image-space pixels to world-space meters.
-    
-        Args:
-            polygon: (N, 2) array-like image-space vertices in pixels.
-    
-        Returns:
-            (N, 2) ndarray of corresponding world-space vertices in meters.
-        """
-        polygon = np.asarray(polygon, dtype=np.float32)
-        if polygon.ndim != 2 or polygon.shape[1] != 2:
-            raise ValueError("polygon must have shape (N, 2)")
-    
-        world_pts = cv2.perspectiveTransform(polygon.reshape(-1, 1, 2), self._H)
-        return world_pts.reshape(-1, 2).astype(np.float64)
+def _project_points(points: Sequence[Sequence[float]], matrix: np.ndarray) -> np.ndarray:
+    arr = np.asarray(points, dtype=np.float32)
+    if arr.shape == (2,):
+        original_shape = arr.shape
+        flat = arr.reshape(1, 2)
+    else:
+        if arr.ndim < 2 or arr.shape[-1] != 2:
+            raise ValueError("points must have final dimension 2")
+        original_shape = arr.shape
+        flat = arr.reshape(-1, 2)
+
+    if flat.shape[0] == 0:
+        return np.empty(original_shape, dtype=np.float64)
+
+    projected = cv2.perspectiveTransform(flat.reshape(-1, 1, 2), matrix).reshape(-1, 2)
+    return projected.reshape(original_shape).astype(np.float64)

@@ -11,21 +11,22 @@ from config.load_build import (
 from communication.mqtt_client import SmartSensorMqttClient
 from communication.services import LatestFrameStore, MetricsPublisherService
 from communication.topics import SensorTopics
-from detection.factory import build_detector
+from perception.detection.factory import build_detector_from_config
+from perception.tracking.factory import build_tracker_from_config
 from runtime.continuity import AnalyticsContinuityContext
 from runtime.periods import (
     resolve_period_policy,
     resolve_period_seconds as resolve_policy_period_seconds,
 )
-from runtime.stage1 import (
+from perception.pipeline import (
     extract_tracking_outputs as _extract_tracking_outputs,
-    process_stage1_period,
 )
+from runtime.observations import PeriodObservationBuffer
+from runtime.perception_runtime import PerceptionRuntime
 from runtime.timing import TimingPolicy
-from tracking.track import Tracker
-from traffic_metrics.engine import PeriodAnalyticsEngine
+from runtime.analytics import PeriodAnalyticsEngine
 from utils.profilers import Profile
-from video_io.frame_producer import (
+from perception.vision_io.frame_producer import (
     DirectFrameProducer,
     OfflineSampledFrameProducer,
     RealTimeSimulationProducer,
@@ -40,14 +41,7 @@ def build_runtime_state(cfg: dict, fps: float, detector):
     areas = build_areas(cfg, num_classes=detector.num_classes)
     geometry_engine = build_geometry_engine(areas, cfg)
 
-    tracker = Tracker(
-        method=cfg["tracker"]["method"],
-        reid_model=cfg["tracker"]["reid_model"],
-        classes=cfg["tracker"]["classes"],
-        device=cfg["tracker"]["device"],
-        half=cfg["tracker"]["half"],
-        per_class=cfg["tracker"]["per_class"],
-    )
+    tracker = build_tracker_from_config(cfg["tracker"])
 
     timing_policy = TimingPolicy.from_config(cfg, fps_override=fps)
     analytics_engine = PeriodAnalyticsEngine(
@@ -129,32 +123,58 @@ def process_period(
     latest_frame_store: Optional[LatestFrameStore] = None,
 ):
     analytics_profile = Profile()
-    stage1_result = process_stage1_period(
+    perception_buffer = PeriodObservationBuffer(max_observations)
+    if analytics_engine.continuity_policy.enabled:
+        perception_buffer.add_context(continuity.boundary_batch)
+
+    perception_runtime = PerceptionRuntime(
         producer=producer,
         detector=detector,
         tracker=tracker,
         timing_policy=timing_policy,
-        period_seconds=period_seconds,
-        max_observations=max_observations,
-        period_idx=period_idx,
-        continuity_policy=analytics_engine.continuity_policy,
-        boundary_context=continuity.boundary_batch,
+        buffer=perception_buffer,
         device=device,
-        stop_event=stop_event,
         latest_frame_store=latest_frame_store,
     )
-    batch = stage1_result.batch
 
-    if batch is None:
+    first_timing = None
+    frames_processed = 0
+    end_of_stream = False
+
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            break
+
+        step = perception_runtime.process_next_frame()
+        if step.end_of_stream:
+            end_of_stream = True
+            break
+        if not step.frame_processed:
+            break
+
+        frames_processed += 1
+        if first_timing is None:
+            first_timing = step.timing
+
+        if timing_policy.period_elapsed_seconds(first_timing, step.timing) >= period_seconds:
+            break
+
+    if frames_processed == 0:
         return {
             "period_idx": period_idx,
             "start_frame": None,
             "end_frame": None,
             "frames_processed": 0,
             "source_frames_elapsed": 0,
-            "end_of_stream": stage1_result.end_of_stream,
+            "end_of_stream": end_of_stream,
             "area_metrics": None,
         }
+
+    batch = perception_buffer.freeze(
+        period_idx=period_idx,
+        timing_mode=timing_policy.mode,
+        fps=timing_policy.fps,
+    )
 
     with analytics_profile:
         area_metrics = analytics_engine.compute_period(batch, continuity)
@@ -163,17 +183,17 @@ def process_period(
         "period_idx": period_idx,
         "start_frame": batch.start_frame,
         "end_frame": batch.end_frame,
-        "frames_processed": stage1_result.frames_processed,
+        "frames_processed": frames_processed,
         "source_frames_elapsed": batch.source_frames_elapsed,
-        "end_of_stream": stage1_result.end_of_stream,
+        "end_of_stream": end_of_stream,
         "area_metrics": area_metrics,
         "processing_stats": {
             "observations": batch.active_observation_count,
             "context_observations": int(batch.observation_count - batch.active_observation_count),
             "timing_mode": timing_policy.mode,
             "period_duration_seconds": batch.duration_seconds,
-            "detection_seconds": stage1_result.detection_seconds,
-            "tracking_seconds": stage1_result.tracking_seconds,
+            "detection_seconds": perception_runtime.detection_seconds,
+            "tracking_seconds": perception_runtime.tracking_seconds,
             "analytics_seconds": analytics_profile.t,
         },
     }
@@ -198,10 +218,7 @@ def run_sensor(
     period_seconds = period_policy.period_seconds
     max_observations = period_policy.max_observations
 
-    detector = build_detector(
-        model_name=cfg["detector"]["model_name"],
-        conf=cfg["detector"]["confidence"],
-    )
+    detector = build_detector_from_config(cfg["detector"])
     device = resolve_detector_device(detector)
 
     tracker, timing_policy, analytics_engine, continuity = build_runtime_state(cfg, fps, detector)
@@ -253,6 +270,8 @@ def run_sensor(
 
     finally:
         producer.release()
+        if hasattr(tracker, "close"):
+            tracker.close()
         if hasattr(detector, "close"):
             detector.close()
 
